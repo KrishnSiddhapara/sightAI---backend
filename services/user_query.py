@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types
 # pyrefly: ignore [missing-import]
 from google.genai.errors import APIError
+from utils.image_validation import encode_vlm_image_part
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +52,16 @@ def answer_image_query(image: Image.Image, user_prompt: str, api_key: str, max_r
         temperature=0.2,
     )
 
+    img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
+    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+
     last_exception = None
 
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[image, f"User Question: {user_prompt.strip()}"],
+                contents=[image_part, f"User Question: {user_prompt.strip()}"],
                 config=config,
             )
 

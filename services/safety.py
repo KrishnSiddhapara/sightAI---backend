@@ -16,6 +16,7 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from utils.json_utils import clean_json_text
+from utils.image_validation import encode_vlm_image_part
 
 logger = logging.getLogger(__name__)
 
@@ -126,11 +127,14 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
     last_error_detail = None
     t0 = time.perf_counter()
 
+    img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
+    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[image, "Perform strict safety screening on this image."],
+                contents=[image_part, "Perform strict safety screening on this image."],
                 config=config,
             )
 

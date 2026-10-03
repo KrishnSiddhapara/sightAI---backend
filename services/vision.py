@@ -15,6 +15,7 @@ from google.genai.errors import APIError
 from services.schemas import GroundedAnalysisResult
 from utils.config import MAX_OUTPUT_TOKENS
 from utils.json_utils import clean_json_text
+from utils.image_validation import encode_vlm_image_part
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +129,15 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
     last_exception = None
     t0 = time.perf_counter()
 
+    img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
+    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+
     for model_name in VLM_MODELS_ORDER:
         for attempt in range(1, max_retries + 1):
             try:
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
+                    contents=[image_part, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
                     config=config,
                 )
 
