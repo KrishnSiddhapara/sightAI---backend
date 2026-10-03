@@ -39,3 +39,25 @@ class GroundedAnalysisResult(BaseModel):
     objects: List[DetectedObjectCategory] = Field(description="List of detected object categories with verified physical counts and independent instance attributes.")
     scene: SceneDescription = Field(description="Scene-level understanding grounded strictly in visible evidence.")
     overall_summary: str = Field(description="Executive summary built strictly from the verified structured objects and scene analysis.")
+
+class SourceItem(BaseModel):
+    title: str = Field(description="Title of the web source or page.")
+    url: str = Field(description="Validated external URL.")
+    domain: str = Field(description="Domain name (e.g. 'amazon.com', 'jamesclear.com').")
+    source_type: str = Field(default="general", description="Source category: official, retailer, publisher, reference, general.")
+    snippet: Optional[str] = Field(default=None, description="Short summary snippet from the source.")
+
+class AgentResearchRequest(BaseModel):
+    question: str = Field(description="User natural language question.")
+    image_context: Optional[dict] = Field(default=None, description="Existing visual analysis context (objects, scene, summary).")
+    conversation_history: Optional[List[dict]] = Field(default=[], description="Previous conversation turn history.")
+    user_region: Optional[str] = Field(default=None, description="Optional country/region preference.")
+
+class AgentResearchResponse(BaseModel):
+    success: bool = True
+    answer: str = Field(description="Grounded response synthesized by the Research Agent.")
+    requires_research: bool = Field(description="Whether external web research tools were executed.")
+    used_tools: List[str] = Field(default=[], description="List of executed tool names.")
+    sources: List[SourceItem] = Field(default=[], description="Verified external sources and links.")
+    confidence: str = Field(default="high", description="Confidence level: high, medium, low.")
+    error: Optional[str] = Field(default=None, description="Error message if research failed.")

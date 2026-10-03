@@ -20,7 +20,8 @@ from services.vision import analyze_image_grounded
 from services.user_query import answer_image_query
 from services.image_editor import edit_image, check_edit_instruction_ambiguity, validate_edit_instruction
 from services.version_manager import export_image_bytes
-from services.schemas import GroundedAnalysisResult
+from services.schemas import GroundedAnalysisResult, AgentResearchRequest, AgentResearchResponse
+from services.research_agent import execute_agent_research
 
 # Load environment variables
 load_dotenv()
@@ -261,6 +262,19 @@ async def ask_question_endpoint(
     except Exception as e:
         logger.error(f"Error answering question: {e}")
         raise HTTPException(status_code=500, detail=f"Question processing failed: {str(e)}")
+
+@app.post("/api/agent/research", response_model=AgentResearchResponse)
+async def research_agent_endpoint(request: AgentResearchRequest):
+    api_key = get_api_key()
+    try:
+        res = execute_agent_research(request, api_key)
+        return res
+    except Exception as e:
+        logger.error(f"Error during research agent execution: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Research agent failed: {str(e)}"
+        )
 
 @app.post("/api/export")
 async def export_image_endpoint(

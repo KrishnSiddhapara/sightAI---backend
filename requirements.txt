@@ -5,3 +5,6 @@ pydantic
 fastapi
 uvicorn
 python-multipart
+ddgs
+httpx
+beautifulsoup4
