@@ -118,9 +118,11 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
         response_schema=SafetyEvaluation,
         safety_settings=native_safety_settings,
         temperature=0.0,
+        max_output_tokens=512,
     )
 
     last_error_detail = None
+    t0 = time.perf_counter()
 
     for attempt in range(1, max_retries + 1):
         try:

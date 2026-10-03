@@ -3,6 +3,7 @@ import io
 import json
 import base64
 import logging
+import time
 from typing import Optional, Dict, Any
 
 from dotenv import load_dotenv
@@ -14,7 +15,8 @@ from fastapi.responses import JSONResponse
 from PIL import Image
 
 # Import existing core Python AI service modules & utilities
-from utils.image_validation import validate_image_file, compute_image_hash
+from utils.image_validation import validate_image_file, compute_image_hash, optimize_image_for_analysis
+from utils.config import MAX_ANALYSIS_DIMENSION, ANALYSIS_TIMEOUT
 from services.safety import check_image_safety
 from services.vision import analyze_image_grounded
 from services.user_query import answer_image_query
@@ -127,14 +129,36 @@ async def safety_check_endpoint(file: UploadFile = File(...)):
 
 @app.post("/api/analyze")
 async def analyze_endpoint(file: UploadFile = File(...)):
+    t_start = time.perf_counter()
     content_bytes = await file.read()
     filename = file.filename or "uploaded_image.jpg"
+    
+    # Step 1: Decode & validate original image
+    t0_decode = time.perf_counter()
     pil_img = parse_and_validate_file(filename, content_bytes)
+    t_decode = time.perf_counter() - t0_decode
+    
     api_key = get_api_key()
 
-    # Safety Gate Pre-screening
-    safety_result = check_image_safety(pil_img, api_key)
+    # Step 2: Optimize image for VLM analysis if dimensions exceed MAX_ANALYSIS_DIMENSION
+    t0_opt = time.perf_counter()
+    orig_w, orig_h = pil_img.size
+    analysis_img = optimize_image_for_analysis(pil_img, MAX_ANALYSIS_DIMENSION)
+    opt_w, opt_h = analysis_img.size
+    t_opt = time.perf_counter() - t0_opt
+
+    logger.info(
+        f"[ANALYSIS PERF] Image '{filename}': Original={orig_w}x{orig_h} ({len(content_bytes)/(1024*1024):.2f}MB), "
+        f"Analysis Optimized={opt_w}x{opt_h}. Decode={t_decode:.3f}s, Optimize={t_opt:.3f}s."
+    )
+
+    # Step 3: Safety Gate Pre-screening (on optimized analysis image)
+    t0_safety = time.perf_counter()
+    safety_result = check_image_safety(analysis_img, api_key)
+    t_safety = time.perf_counter() - t0_safety
+    
     if not safety_result.get("is_safe", False):
+        logger.warning(f"[ANALYSIS PERF] Image safety failed after {time.perf_counter() - t_start:.3f}s: {safety_result.get('category')}")
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
@@ -144,19 +168,41 @@ async def analyze_endpoint(file: UploadFile = File(...)):
             }
         )
 
+    # Step 4: Grounded VLM Analysis (on optimized analysis image)
+    t0_vlm = time.perf_counter()
     try:
-        grounded_result: GroundedAnalysisResult = analyze_image_grounded(pil_img, api_key)
+        grounded_result: GroundedAnalysisResult = analyze_image_grounded(analysis_img, api_key)
+        t_vlm = time.perf_counter() - t0_vlm
+        t_total = time.perf_counter() - t_start
+
+        logger.info(
+            f"[ANALYSIS PERF] Pipeline complete for '{filename}': Total={t_total:.3f}s "
+            f"(Decode={t_decode:.3f}s, Opt={t_opt:.3f}s, Safety={t_safety:.3f}s, VLM={t_vlm:.3f}s). "
+            f"Objects={len(grounded_result.objects)}, Scene='{grounded_result.scene.category}'."
+        )
+
         return {
             "success": True,
             "image_hash": compute_image_hash(content_bytes),
             "safety": safety_result,
-            "data": grounded_result.model_dump()
+            "data": grounded_result.model_dump(),
+            "performance": {
+                "total_seconds": round(t_total, 3),
+                "vlm_seconds": round(t_vlm, 3),
+                "original_dimensions": [orig_w, orig_h],
+                "analysis_dimensions": [opt_w, opt_h]
+            }
         }
     except Exception as e:
-        logger.error(f"Error during analysis: {e}")
-        raise HTTPException(
+        t_total = time.perf_counter() - t_start
+        logger.error(f"[ANALYSIS PERF] Exception during VLM analysis after {t_total:.3f}s: {e}")
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Analysis failed: {str(e)}"
+            content={
+                "success": False,
+                "error": f"Image analysis encountered an error ({str(e)}). Please retry or upload a smaller image.",
+                "safety": safety_result
+            }
         )
 
 @app.post("/api/edit")
@@ -251,7 +297,8 @@ async def ask_question_endpoint(
         raise HTTPException(status_code=400, detail="Either file upload or image_base64 must be provided.")
 
     try:
-        answer_text = answer_image_query(pil_img, question, api_key)
+        opt_img = optimize_image_for_analysis(pil_img, MAX_ANALYSIS_DIMENSION)
+        answer_text = answer_image_query(opt_img, question, api_key)
         return {
             "success": True,
             "question": question.strip(),

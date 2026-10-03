@@ -14,6 +14,8 @@ from google.genai.errors import APIError
 
 from services.schemas import GroundedAnalysisResult
 
+from utils.config import MAX_OUTPUT_TOKENS
+
 logger = logging.getLogger(__name__)
 
 GROUNDED_VISION_SYSTEM_PROMPT = """You are a world-class Computer Vision & Physical Object Verification AI.
@@ -118,9 +120,11 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
         response_mime_type="application/json",
         response_schema=GroundedAnalysisResult,
         temperature=0.0,  # Deterministic temperature for maximum precision & zero hallucination
+        max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
     last_exception = None
+    t0 = time.perf_counter()
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
@@ -129,13 +133,16 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
                 config=config,
             )
 
+            t_elapsed = time.perf_counter() - t0
             if not response or not response.text:
                 raise ValueError("Received an empty response from Gemini Vision API.")
 
             data = json.loads(response.text)
             raw_result = GroundedAnalysisResult.model_validate(data)
             sanitized = sanitize_bounding_boxes(raw_result)
-            return sanitize_scene_category(sanitized)
+            final_res = sanitize_scene_category(sanitized)
+            logger.info(f"[PERF] Grounded VLM analysis completed in {t_elapsed:.3f}s (objects={len(final_res.objects)}, scene={final_res.scene.category}).")
+            return final_res
 
         except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
             last_exception = e
