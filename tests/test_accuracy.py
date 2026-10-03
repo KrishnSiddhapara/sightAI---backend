@@ -187,7 +187,7 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
         self.assertIsNone(res.objects[0].instances[2].bounding_box)
 
     def test_bounding_box_validation_and_sanitization(self):
-        """Verify invalid or inverted bounding boxes are safely discarded to prevent rendering bugs."""
+        """Verify invalid or inverted bounding boxes are safely repaired or discarded to prevent rendering bugs."""
         from services.vision import sanitize_bounding_boxes
         from services.schemas import BoundingBox
 
@@ -201,14 +201,23 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
             attributes=InstanceAttributes(),
             bounding_box=BoundingBox(x_min=200, y_min=50, x_max=50, y_max=300)
         )
+        inst_zero_area = ObjectInstance(
+            id="item_3",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=100, y_min=100, x_max=102, y_max=102)
+        )
 
-        cat = DetectedObjectCategory(name="box", confirmed_count=2, instances=[inst_valid, inst_inverted])
+        cat = DetectedObjectCategory(name="box", confirmed_count=3, instances=[inst_valid, inst_inverted, inst_zero_area])
         scene = SceneDescription(category="Indoor", environment="Room", primary_activity="Testing", summary="Test")
         res = GroundedAnalysisResult(objects=[cat], scene=scene, overall_summary="Test")
 
         sanitized = sanitize_bounding_boxes(res)
         self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
-        self.assertIsNone(sanitized.objects[0].instances[1].bounding_box)
+        # Verify auto-repair of inverted x_min and x_max
+        self.assertEqual(sanitized.objects[0].instances[1].bounding_box.x_min, 50)
+        self.assertEqual(sanitized.objects[0].instances[1].bounding_box.x_max, 200)
+        # Verify zero-area box (< 5 units) is discarded
+        self.assertIsNone(sanitized.objects[0].instances[2].bounding_box)
 
     def test_image_preprocessing_rgb_and_hash(self):
         """Verify image validation handles RGB mode and computes distinct hashes for state invalidation."""

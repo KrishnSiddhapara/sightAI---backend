@@ -84,25 +84,35 @@ def sanitize_scene_category(result: GroundedAnalysisResult) -> GroundedAnalysisR
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
     Validates and sanitizes bounding boxes across all object instances.
-    If coordinates are invalid (e.g. x_min >= x_max, y_min >= y_max, or out of bounds [0, 1000]),
-    resets bounding_box to None.
+    Auto-repairs inverted coordinates (x_min > x_max or y_min > y_max) using min/max,
+    ensures boundaries are within [0, 1000], and discards boxes with zero/tiny area (< 5px).
     """
     for category in result.objects:
         for instance in category.instances:
             bbox = instance.bounding_box
             if bbox is not None:
-                x_min = max(0, min(1000, bbox.x_min))
-                y_min = max(0, min(1000, bbox.y_min))
-                x_max = max(0, min(1000, bbox.x_max))
-                y_max = max(0, min(1000, bbox.y_max))
-                
-                if x_min < x_max and y_min < y_max:
-                    bbox.x_min = x_min
-                    bbox.y_min = y_min
-                    bbox.x_max = x_max
-                    bbox.y_max = y_max
-                else:
-                    logger.warning(f"Discarding invalid bounding box for instance {instance.id}: [{bbox.x_min}, {bbox.y_min}, {bbox.x_max}, {bbox.y_max}]")
+                try:
+                    x1 = max(0, min(1000, int(bbox.x_min)))
+                    y1 = max(0, min(1000, int(bbox.y_min)))
+                    x2 = max(0, min(1000, int(bbox.x_max)))
+                    y2 = max(0, min(1000, int(bbox.y_max)))
+
+                    x_min = min(x1, x2)
+                    x_max = max(x1, x2)
+                    y_min = min(y1, y2)
+                    y_max = max(y1, y2)
+
+                    # Ensure box has minimum visible dimension (at least 5 units in 1000 scale)
+                    if (x_max - x_min) >= 5 and (y_max - y_min) >= 5:
+                        bbox.x_min = x_min
+                        bbox.y_min = y_min
+                        bbox.x_max = x_max
+                        bbox.y_max = y_max
+                    else:
+                        logger.warning(f"Discarding zero-area bounding box for instance {instance.id}: [{x_min}, {y_min}, {x_max}, {y_max}]")
+                        instance.bounding_box = None
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid bounding box types for instance {instance.id}: {e}")
                     instance.bounding_box = None
     return result
 
