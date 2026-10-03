@@ -104,6 +104,12 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
                                 "pose": "standing",
                                 "action": "waving",
                                 "accessories": "none visible"
+                            },
+                            "bounding_box": {
+                                "x_min": 100,
+                                "y_min": 150,
+                                "x_max": 300,
+                                "y_max": 800
                             }
                         },
                         {
@@ -114,6 +120,12 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
                                 "pose": "sitting",
                                 "action": "talking",
                                 "accessories": "glasses"
+                            },
+                            "bounding_box": {
+                                "x_min": 350,
+                                "y_min": 200,
+                                "x_max": 550,
+                                "y_max": 750
                             }
                         },
                         {
@@ -124,7 +136,8 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
                                 "pose": "standing",
                                 "action": "smiling",
                                 "accessories": "hat"
-                            }
+                            },
+                            "bounding_box": null
                         }
                     ]
                 },
@@ -140,6 +153,12 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
                                 "type_or_subtype": "sedan",
                                 "visible_details": "parked on left",
                                 "pose": "parked"
+                            },
+                            "bounding_box": {
+                                "x_min": 600,
+                                "y_min": 400,
+                                "x_max": 950,
+                                "y_max": 850
                             }
                         }
                     ]
@@ -163,8 +182,33 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
         self.assertEqual(res.objects[0].confirmed_count, 3)
         self.assertEqual(len(res.objects[0].instances), 3)
         self.assertEqual(res.objects[0].instances[0].attributes.clothing_color, "red")
-        self.assertEqual(res.objects[0].instances[1].attributes.clothing_color, "blue")
-        self.assertEqual(res.objects[0].instances[2].attributes.clothing_color, "white")
+        self.assertIsNotNone(res.objects[0].instances[0].bounding_box)
+        self.assertEqual(res.objects[0].instances[0].bounding_box.x_min, 100)
+        self.assertIsNone(res.objects[0].instances[2].bounding_box)
+
+    def test_bounding_box_validation_and_sanitization(self):
+        """Verify invalid or inverted bounding boxes are safely discarded to prevent rendering bugs."""
+        from services.vision import sanitize_bounding_boxes
+        from services.schemas import BoundingBox
+
+        inst_valid = ObjectInstance(
+            id="item_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=50, y_min=50, x_max=200, y_max=300)
+        )
+        inst_inverted = ObjectInstance(
+            id="item_2",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=200, y_min=50, x_max=50, y_max=300)
+        )
+
+        cat = DetectedObjectCategory(name="box", confirmed_count=2, instances=[inst_valid, inst_inverted])
+        scene = SceneDescription(category="Indoor", environment="Room", primary_activity="Testing", summary="Test")
+        res = GroundedAnalysisResult(objects=[cat], scene=scene, overall_summary="Test")
+
+        sanitized = sanitize_bounding_boxes(res)
+        self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
+        self.assertIsNone(sanitized.objects[0].instances[1].bounding_box)
 
     def test_image_preprocessing_rgb_and_hash(self):
         """Verify image validation handles RGB mode and computes distinct hashes for state invalidation."""

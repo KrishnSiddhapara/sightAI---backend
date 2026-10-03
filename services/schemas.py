@@ -11,9 +11,16 @@ class InstanceAttributes(BaseModel):
     type_or_subtype: Optional[str] = Field(default="unknown", description="Specific type or visual characteristic (e.g. 'sedan', 'mountain bike', 'coniferous fir').")
     visible_details: Optional[str] = Field(default="none noted", description="Notable visible characteristics belonging strictly to this single physical instance.")
 
+class BoundingBox(BaseModel):
+    x_min: int = Field(ge=0, le=1000, description="Normalized X minimum coordinate (0 to 1000 scale, left edge).")
+    y_min: int = Field(ge=0, le=1000, description="Normalized Y minimum coordinate (0 to 1000 scale, top edge).")
+    x_max: int = Field(ge=0, le=1000, description="Normalized X maximum coordinate (0 to 1000 scale, right edge).")
+    y_max: int = Field(ge=0, le=1000, description="Normalized Y maximum coordinate (0 to 1000 scale, bottom edge).")
+
 class ObjectInstance(BaseModel):
     id: str = Field(description="Unique instance identifier (e.g. 'person_1', 'person_2', 'car_1').")
     attributes: InstanceAttributes = Field(description="Independent attributes strictly belonging to this single visual instance.")
+    bounding_box: Optional[BoundingBox] = Field(default=None, description="Normalized 0-1000 bounding box coordinates [x_min, y_min, x_max, y_max] surrounding this specific instance. Return null if localization is uncertain.")
     uncertainty_reason: Optional[str] = Field(default=None, description="Explicit reason if identification or count of this instance is uncertain (e.g. 'Partially occluded behind tree').")
 
 class DetectedObjectCategory(BaseModel):

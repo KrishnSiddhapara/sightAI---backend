@@ -40,14 +40,50 @@ STEP 3: INDEPENDENT PERSON-BY-PERSON & INSTANCE ATTRIBUTE EXTRACTION
 - If Person 1 wears a red shirt and Person 2 wears a blue jacket, Person 1 MUST have clothing_color='red' and Person 2 MUST have clothing_color='blue'. NEVER share or copy attributes across entities!
 - If an attribute (e.g. exact clothing, pose, action, age, brand) is not clearly visible, return "not clearly visible" or "unknown". DO NOT guess!
 
-STEP 4: IMAGE-WIDE CONSISTENCY CROSS-CHECK
+STEP 4: GROUNDED BOUNDING BOX LOCALIZATION
+- For EVERY confidently identified physical instance, provide bounding box coordinates in 'bounding_box': {"x_min": int, "y_min": int, "x_max": int, "y_max": int}.
+- Use normalized 0 to 1000 integer coordinates where:
+  * x_min: Leftmost edge of the object (0 = left boundary of image, 1000 = right boundary of image)
+  * y_min: Topmost edge of the object (0 = top boundary of image, 1000 = bottom boundary of image)
+  * x_max: Rightmost edge of the object (0 to 1000)
+  * y_max: Bottommost edge of the object (0 to 1000)
+- Ensure x_min < x_max and y_min < y_max.
+- The bounding box MUST tightly surround that specific object instance.
+- If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER invent fake or estimated coordinates!
+
+STEP 5: IMAGE-WIDE CONSISTENCY CROSS-CHECK
 Before returning the final structured JSON, cross-check:
 A. Is every reported object actually visible in the image?
 B. Is the confirmed count equal to the number of distinct physical instances?
 C. Are attributes assigned strictly to their correct owner entity?
 D. Were any shadows, reflections, or photos inside screens mistakenly counted?
-E. Are minor background details excluded unless clearly prominent?
+E. Does every bounding box surround the exact target instance and remain inside valid [0, 1000] boundaries?
 """
+
+def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
+    """
+    Validates and sanitizes bounding boxes across all object instances.
+    If coordinates are invalid (e.g. x_min >= x_max, y_min >= y_max, or out of bounds [0, 1000]),
+    resets bounding_box to None.
+    """
+    for category in result.objects:
+        for instance in category.instances:
+            bbox = instance.bounding_box
+            if bbox is not None:
+                x_min = max(0, min(1000, bbox.x_min))
+                y_min = max(0, min(1000, bbox.y_min))
+                x_max = max(0, min(1000, bbox.x_max))
+                y_max = max(0, min(1000, bbox.y_max))
+                
+                if x_min < x_max and y_min < y_max:
+                    bbox.x_min = x_min
+                    bbox.y_min = y_min
+                    bbox.x_max = x_max
+                    bbox.y_max = y_max
+                else:
+                    logger.warning(f"Discarding invalid bounding box for instance {instance.id}: [{bbox.x_min}, {bbox.y_min}, {bbox.x_max}, {bbox.y_max}]")
+                    instance.bounding_box = None
+    return result
 
 def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 3) -> GroundedAnalysisResult:
     """
@@ -71,7 +107,7 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, and scene understanding on this image."],
+                contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene understanding on this image."],
                 config=config,
             )
 
@@ -79,7 +115,8 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
                 raise ValueError("Received an empty response from Gemini Vision API.")
 
             data = json.loads(response.text)
-            return GroundedAnalysisResult.model_validate(data)
+            raw_result = GroundedAnalysisResult.model_validate(data)
+            return sanitize_bounding_boxes(raw_result)
 
         except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
             last_exception = e
