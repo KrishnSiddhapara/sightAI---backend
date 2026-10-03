@@ -13,8 +13,8 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from services.schemas import GroundedAnalysisResult
-
 from utils.config import MAX_OUTPUT_TOKENS
+from utils.json_utils import clean_json_text
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,8 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
             if not response or not response.text:
                 raise ValueError("Received an empty response from Gemini Vision API.")
 
-            data = json.loads(response.text)
+            raw_text = clean_json_text(response.text)
+            data = json.loads(raw_text)
             raw_result = GroundedAnalysisResult.model_validate(data)
             sanitized = sanitize_bounding_boxes(raw_result)
             final_res = sanitize_scene_category(sanitized)

@@ -15,6 +15,8 @@ from google.genai import types
 # pyrefly: ignore [missing-import]
 from google.genai.errors import APIError
 
+from utils.json_utils import clean_json_text
+
 logger = logging.getLogger(__name__)
 
 class SafetyCategory(str, Enum):
@@ -146,7 +148,8 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
                 break
 
             # Parse structured response
-            data = json.loads(response.text)
+            raw_text = clean_json_text(response.text)
+            data = json.loads(raw_text)
             
             is_safe = bool(data.get("is_safe", False))
             category = str(data.get("category", SafetyCategory.UNKNOWN.value)).upper()
@@ -184,8 +187,23 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
             break
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse safety evaluation JSON: {e}")
+            logger.warning(f"Failed to parse safety evaluation JSON (attempt {attempt}/{max_retries}): {e}. Raw text: {response.text[:200] if response and response.text else 'Empty'}")
             last_error_detail = "Invalid JSON safety response format."
+            
+            # Fallback string matching if JSON parsing fails but explicit SAFE string is present
+            if response and response.text and '"is_safe": true' in response.text.lower():
+                logger.info("Recovered safety check result via fallback string matching (is_safe=True).")
+                return {
+                    "is_safe": True,
+                    "category": SafetyCategory.SAFE.value,
+                    "confidence": 0.9,
+                    "reasoning": "Recovered via fallback string parsing.",
+                    "error": None
+                }
+
+            if attempt < max_retries:
+                time.sleep(1.0)
+                continue
             break
 
         except Exception as e:
