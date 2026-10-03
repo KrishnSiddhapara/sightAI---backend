@@ -132,50 +132,52 @@ async def analyze_endpoint(file: UploadFile = File(...)):
     import uuid
     req_id = f"req_{uuid.uuid4().hex[:8]}"
     t_start = time.perf_counter()
-    content_bytes = await file.read()
-    filename = file.filename or "uploaded_image.jpg"
-    
-    logger.info(f"[{req_id}] [UPLOAD] Image received '{filename}' ({len(content_bytes)/(1024*1024):.2f} MB)")
+    safety_result = None
 
-    # Step 1: Decode & validate original image
-    t0_decode = time.perf_counter()
-    pil_img = parse_and_validate_file(filename, content_bytes)
-    t_decode = time.perf_counter() - t0_decode
-    logger.info(f"[{req_id}] [VALIDATION] Image decoding & validation completed in {t_decode:.3f}s")
-    
-    api_key = get_api_key()
-
-    # Step 2: Optimize image for VLM analysis
-    t0_opt = time.perf_counter()
-    orig_w, orig_h = pil_img.size
-    analysis_img = optimize_image_for_analysis(pil_img, MAX_ANALYSIS_DIMENSION)
-    opt_w, opt_h = analysis_img.size
-    t_opt = time.perf_counter() - t0_opt
-
-    logger.info(f"[{req_id}] [PREPROCESSING] Image optimized ({orig_w}x{orig_h} -> {opt_w}x{opt_h}) in {t_opt:.3f}s")
-
-    # Step 3: Safety Gate Pre-screening
-    t0_safety = time.perf_counter()
-    safety_result = check_image_safety(analysis_img, api_key)
-    t_safety = time.perf_counter() - t0_safety
-    logger.info(f"[{req_id}] [SAFETY] Safety screening completed (is_safe={safety_result.get('is_safe')}) in {t_safety:.3f}s")
-    
-    if not safety_result.get("is_safe", False):
-        logger.warning(f"[{req_id}] [SAFETY_FLAGGED] Image rejected after {time.perf_counter() - t_start:.3f}s: {safety_result.get('category')}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "success": False,
-                "request_id": req_id,
-                "error": safety_result.get("error") or "Image rejected by safety screening gate.",
-                "safety": safety_result
-            }
-        )
-
-    # Step 4: Grounded VLM Analysis
-    t0_vlm = time.perf_counter()
-    logger.info(f"[{req_id}] [VLM_REQUEST] Sending multimodal request to Gemini VLM API")
     try:
+        content_bytes = await file.read()
+        filename = file.filename or "uploaded_image.jpg"
+        
+        logger.info(f"[{req_id}] [UPLOAD] Image received '{filename}' ({len(content_bytes)/(1024*1024):.2f} MB)")
+
+        # Step 1: Decode & validate original image
+        t0_decode = time.perf_counter()
+        pil_img = parse_and_validate_file(filename, content_bytes)
+        t_decode = time.perf_counter() - t0_decode
+        logger.info(f"[{req_id}] [VALIDATION] Image decoding & validation completed in {t_decode:.3f}s")
+        
+        api_key = get_api_key()
+
+        # Step 2: Optimize image for VLM analysis
+        t0_opt = time.perf_counter()
+        orig_w, orig_h = pil_img.size
+        analysis_img = optimize_image_for_analysis(pil_img, MAX_ANALYSIS_DIMENSION)
+        opt_w, opt_h = analysis_img.size
+        t_opt = time.perf_counter() - t0_opt
+
+        logger.info(f"[{req_id}] [PREPROCESSING] Image optimized ({orig_w}x{orig_h} -> {opt_w}x{opt_h}) in {t_opt:.3f}s")
+
+        # Step 3: Safety Gate Pre-screening
+        t0_safety = time.perf_counter()
+        safety_result = check_image_safety(analysis_img, api_key)
+        t_safety = time.perf_counter() - t0_safety
+        logger.info(f"[{req_id}] [SAFETY] Safety screening completed (is_safe={safety_result.get('is_safe')}) in {t_safety:.3f}s")
+        
+        if not safety_result.get("is_safe", False):
+            logger.warning(f"[{req_id}] [SAFETY_FLAGGED] Image rejected after {time.perf_counter() - t_start:.3f}s: {safety_result.get('category')}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "request_id": req_id,
+                    "error": safety_result.get("error") or "Image rejected by safety screening gate.",
+                    "safety": safety_result
+                }
+            )
+
+        # Step 4: Grounded VLM Analysis
+        t0_vlm = time.perf_counter()
+        logger.info(f"[{req_id}] [VLM_REQUEST] Sending multimodal request to Gemini VLM API")
         grounded_result: GroundedAnalysisResult = analyze_image_grounded(analysis_img, api_key)
         t_vlm = time.perf_counter() - t0_vlm
         t_total = time.perf_counter() - t_start
@@ -196,6 +198,18 @@ async def analyze_endpoint(file: UploadFile = File(...)):
                 "analysis_dimensions": [opt_w, opt_h]
             }
         }
+    except HTTPException as http_ex:
+        t_total = time.perf_counter() - t_start
+        logger.warning(f"[{req_id}] [HTTP_ERROR] {http_ex.status_code}: {http_ex.detail} after {t_total:.3f}s")
+        return JSONResponse(
+            status_code=http_ex.status_code,
+            content={
+                "success": False,
+                "request_id": req_id,
+                "error": http_ex.detail,
+                "safety": safety_result
+            }
+        )
     except Exception as e:
         t_total = time.perf_counter() - t_start
         logger.error(f"[{req_id}] [VLM_ERROR] Exception during analysis after {t_total:.3f}s: {e}")

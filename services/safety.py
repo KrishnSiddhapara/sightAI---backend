@@ -73,11 +73,12 @@ def get_fail_closed_response(error_detail: str = "Safety check unavailable") -> 
         "error": f"⚠️ Safety check unavailable: {error_detail}",
     }
 
-def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -> Dict[str, Any]:
+VLM_SAFETY_MODELS_ORDER = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 2) -> Dict[str, Any]:
     """
     Performs pre-analysis safety screening on an image before normal processing.
-    Includes automatic retries for network/DNS glitches and configures BLOCK_NONE
-    on the classification call so Gemini outputs the structured SafetyEvaluation JSON.
+    Includes automatic model fallbacks across VLM_SAFETY_MODELS_ORDER and retries for network glitches.
     
     Returns a dictionary with keys:
         - is_safe (bool)
@@ -85,6 +86,7 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
         - confidence (float)
         - reasoning (str)
         - error (Optional[str])
+        - error_type (Optional[str])
     """
     if not api_key or api_key == "your_api_key_here":
         return get_fail_closed_response("API key is missing or unconfigured.")
@@ -94,8 +96,6 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
 
     client = genai.Client(api_key=api_key)
 
-    # Use BLOCK_NONE on the classification call itself so Gemini will NOT block
-    # its own output text when returning the SafetyEvaluation JSON structure.
     native_safety_settings = [
         types.SafetySetting(
             category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
@@ -125,97 +125,62 @@ def check_image_safety(image: Image.Image, api_key: str, max_retries: int = 3) -
     )
 
     last_error_detail = None
-    t0 = time.perf_counter()
-
     img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
     image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[image_part, "Perform strict safety screening on this image."],
-                config=config,
-            )
+    for model_name in VLM_SAFETY_MODELS_ORDER:
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[image_part, "Perform strict safety screening on this image."],
+                    config=config,
+                )
 
-            # Check if response was empty
-            if not response or not response.text:
-                finish_reason = None
-                if response and response.candidates:
-                    finish_reason = getattr(response.candidates[0], "finish_reason", None)
+                if not response or not response.text:
+                    finish_reason = None
+                    if response and response.candidates:
+                        finish_reason = getattr(response.candidates[0], "finish_reason", None)
+                    
+                    logger.warning(f"Safety API response empty on model '{model_name}' (attempt {attempt}). Finish reason: {finish_reason}")
+                    last_error_detail = f"Content safety screening failed (Finish reason: {finish_reason})."
+                    if attempt < max_retries:
+                        time.sleep(1.0)
+                        continue
+                    break
+
+                # Parse structured response
+                raw_text = clean_json_text(response.text)
+                data = json.loads(raw_text)
                 
-                logger.warning(f"Safety API response empty on attempt {attempt}. Finish reason: {finish_reason}")
-                last_error_detail = f"Content safety screening failed (Finish reason: {finish_reason})."
+                is_safe = bool(data.get("is_safe", False))
+                category = str(data.get("category", SafetyCategory.UNKNOWN.value)).upper()
+                confidence = float(data.get("confidence", 0.0))
+                reasoning = str(data.get("reasoning", ""))
+
+                valid_categories = {c.value for c in SafetyCategory}
+                if category not in valid_categories:
+                    category = SafetyCategory.OTHER_SENSITIVE_CONTENT.value if not is_safe else SafetyCategory.SAFE.value
+
+                if category != SafetyCategory.SAFE.value:
+                    is_safe = False
+
+                logger.info(f"Safety screening passed with model '{model_name}': is_safe={is_safe}, category={category}")
+                return {
+                    "is_safe": is_safe,
+                    "category": category,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "error": None if is_safe else f"⚠️ Content flagged: Image categorized as {category}. {reasoning}",
+                    "error_type": None if is_safe else "content_flag"
+                }
+
+            except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
+                last_error_detail = str(e)
+                logger.warning(f"Safety check error on model '{model_name}' (attempt {attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
                     time.sleep(1.0)
                     continue
                 break
-
-            # Parse structured response
-            raw_text = clean_json_text(response.text)
-            data = json.loads(raw_text)
-            
-            is_safe = bool(data.get("is_safe", False))
-            category = str(data.get("category", SafetyCategory.UNKNOWN.value)).upper()
-            confidence = float(data.get("confidence", 0.0))
-            reasoning = str(data.get("reasoning", ""))
-
-            # Ensure category aligns with known SafetyCategory values
-            valid_categories = {c.value for c in SafetyCategory}
-            if category not in valid_categories:
-                category = SafetyCategory.OTHER_SENSITIVE_CONTENT.value if not is_safe else SafetyCategory.SAFE.value
-
-            # Enforce consistency: if category is not SAFE, is_safe MUST be False
-            if category != SafetyCategory.SAFE.value:
-                is_safe = False
-
-            return {
-                "is_safe": is_safe,
-                "category": category,
-                "confidence": confidence,
-                "reasoning": reasoning,
-                "error": None if is_safe else f"⚠️ Content flagged: Image was categorized as {category}. {reasoning}",
-            }
-
-        except (socket.gaierror, ConnectionError, TimeoutError) as e:
-            logger.warning(f"Network glitch during safety check (attempt {attempt}/{max_retries}): {e}")
-            last_error_detail = "Network connection failed during safety verification."
-            if attempt < max_retries:
-                time.sleep(1.5)
-                continue
-            break
-
-        except APIError as e:
-            logger.error(f"Gemini API error during safety check: {e}")
-            last_error_detail = f"Gemini API service error: {e.message}"
-            break
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse safety evaluation JSON (attempt {attempt}/{max_retries}): {e}. Raw text: {response.text[:200] if response and response.text else 'Empty'}")
-            last_error_detail = "Invalid JSON safety response format."
-            
-            # Fallback string matching if JSON parsing fails but explicit SAFE string is present
-            if response and response.text and '"is_safe": true' in response.text.lower():
-                logger.info("Recovered safety check result via fallback string matching (is_safe=True).")
-                return {
-                    "is_safe": True,
-                    "category": SafetyCategory.SAFE.value,
-                    "confidence": 0.9,
-                    "reasoning": "Recovered via fallback string parsing.",
-                    "error": None
-                }
-
-            if attempt < max_retries:
-                time.sleep(1.0)
-                continue
-            break
-
-        except Exception as e:
-            logger.error(f"Unexpected exception during safety check: {e}")
-            last_error_detail = f"Safety classifier error: {str(e)}"
-            if attempt < max_retries:
-                time.sleep(1.0)
-                continue
-            break
 
     return get_fail_closed_response(last_error_detail or "We could not verify this image safely. Please try again.")
