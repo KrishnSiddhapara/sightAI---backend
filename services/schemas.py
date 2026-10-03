@@ -30,8 +30,8 @@ class DetectedObjectCategory(BaseModel):
     instances: List[ObjectInstance] = Field(default=[], description="Independent instance objects for each detected physical entity.")
 
 class SceneDescription(BaseModel):
-    category: str = Field(description="Primary scene category (e.g. Indoor, Outdoor, Street, Office, Classroom, Home, Restaurant, Sports, Nature, Beach, Document, Other).")
-    environment: str = Field(description="Specific environment description (e.g., 'Outdoor grassy park field with paved walkway'). Do not invent specific named venues unless visually proven.")
+    category: str = Field(description="Primary scene category as a short 1-3 word label (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document'). Must be a concise title, never a sentence.")
+    environment: str = Field(description="Specific environment description (e.g., 'Indoor office space with wooden desks'). Do not invent specific named venues unless visually proven.")
     primary_activity: str = Field(description="Primary activity occurring in the scene.")
     summary: str = Field(description="Concise visual summary of the scene.")
 

@@ -51,14 +51,32 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION
 - The bounding box MUST tightly surround that specific object instance.
 - If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER invent fake or estimated coordinates!
 
-STEP 5: IMAGE-WIDE CONSISTENCY CROSS-CHECK
+STEP 5: CONCISE SCENE CLASSIFICATION
+- Classify the primary scene category as a CONCISE 1-3 word title (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document').
+- NEVER return a full sentence or description under 'category'. Put detailed descriptions in 'environment', 'primary_activity', and 'summary'.
+
+STEP 6: IMAGE-WIDE CONSISTENCY CROSS-CHECK
 Before returning the final structured JSON, cross-check:
 A. Is every reported object actually visible in the image?
 B. Is the confirmed count equal to the number of distinct physical instances?
 C. Are attributes assigned strictly to their correct owner entity?
 D. Were any shadows, reflections, or photos inside screens mistakenly counted?
 E. Does every bounding box surround the exact target instance and remain inside valid [0, 1000] boundaries?
+F. Is scene category a concise 1-3 word title?
 """
+
+def sanitize_scene_category(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
+    """
+    Ensures scene.category is a clean, concise 1-3 word title.
+    Normalizes long sentence outputs or punctuation artifacts.
+    """
+    if result.scene and result.scene.category:
+        raw_cat = result.scene.category.strip().strip('*"`\'')
+        if '.' in raw_cat or ',' in raw_cat or len(raw_cat.split()) > 3:
+            cleaned_words = [w.strip('.,;:') for w in raw_cat.split() if w.strip('.,;:')]
+            raw_cat = " ".join(cleaned_words[:3])
+        result.scene.category = raw_cat.title() if raw_cat else "General Scene"
+    return result
 
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
@@ -107,7 +125,7 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene understanding on this image."],
+                contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
                 config=config,
             )
 
@@ -116,7 +134,8 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
 
             data = json.loads(response.text)
             raw_result = GroundedAnalysisResult.model_validate(data)
-            return sanitize_bounding_boxes(raw_result)
+            sanitized = sanitize_bounding_boxes(raw_result)
+            return sanitize_scene_category(sanitized)
 
         except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
             last_exception = e
