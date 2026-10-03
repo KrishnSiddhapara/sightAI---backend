@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # List of supported image-editing models in Developer API mode
 PRIMARY_IMAGE_EDIT_MODEL = "gemini-2.5-flash-image"
-FALLBACK_IMAGE_EDIT_MODELS = ["gemini-3.1-flash-image", "gemini-3-pro-image"]
+FALLBACK_IMAGE_EDIT_MODELS = ["gemini-2.0-flash-exp", "imagen-3.0-generate-002", "gemini-2.5-flash"]
 
 IMAGE_EDIT_SYSTEM_PROMPT = """You are an expert AI Image Editor.
 Your task is to modify the input image strictly according to the user's edit request while preserving all unrelated content.

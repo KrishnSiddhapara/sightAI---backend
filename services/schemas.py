@@ -47,6 +47,19 @@ class SourceItem(BaseModel):
     source_type: str = Field(default="general", description="Source category: official, retailer, publisher, reference, general.")
     snippet: Optional[str] = Field(default=None, description="Short summary snippet from the source.")
 
+class FactItem(BaseModel):
+    label: str = Field(description="Fact title e.g. 'Listed Price', 'Official Publisher', 'Processor', 'Availability'.")
+    value: str = Field(description="Extracted value e.g. '₹49,999', 'Avery (Penguin)', 'Intel Core i7-13700H', 'In Stock'.")
+    source_title: Optional[str] = Field(default=None, description="Supporting source name.")
+
+class ProductEntity(BaseModel):
+    name: Optional[str] = Field(default=None, description="Product or entity title.")
+    brand: Optional[str] = Field(default=None, description="Brand or manufacturer.")
+    model: Optional[str] = Field(default=None, description="Model designation/number.")
+    variant: Optional[str] = Field(default=None, description="Variant details e.g. 256GB, Red, Edition.")
+    category: Optional[str] = Field(default=None, description="Category e.g. smartphone, book, laptop, vehicle, camera.")
+    confidence: float = Field(default=1.0, description="Confidence score 0.0 - 1.0.")
+
 class AgentResearchRequest(BaseModel):
     question: str = Field(description="User natural language question.")
     image_context: Optional[dict] = Field(default=None, description="Existing visual analysis context (objects, scene, summary).")
@@ -56,8 +69,12 @@ class AgentResearchRequest(BaseModel):
 class AgentResearchResponse(BaseModel):
     success: bool = True
     answer: str = Field(description="Grounded response synthesized by the Research Agent.")
+    intent: str = Field(default="GENERAL_KNOWLEDGE", description="Detected query intent.")
     requires_research: bool = Field(description="Whether external web research tools were executed.")
+    entity: Optional[ProductEntity] = Field(default=None, description="Extracted product/entity details.")
+    facts: List[FactItem] = Field(default=[], description="Structured key facts extracted from research.")
     used_tools: List[str] = Field(default=[], description="List of executed tool names.")
     sources: List[SourceItem] = Field(default=[], description="Verified external sources and links.")
     confidence: str = Field(default="high", description="Confidence level: high, medium, low.")
+    research_summary: Optional[str] = Field(default=None, description="User-facing concise research summary.")
     error: Optional[str] = Field(default=None, description="Error message if research failed.")

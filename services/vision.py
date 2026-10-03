@@ -105,10 +105,12 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     instance.bounding_box = None
     return result
 
-def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 3) -> GroundedAnalysisResult:
+VLM_MODELS_ORDER = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 2) -> GroundedAnalysisResult:
     """
-    Sends PIL image to Gemini 2.5 Flash with structured Pydantic schema (GroundedAnalysisResult).
-    Includes automatic retries for transient network glitches.
+    Sends PIL image to Gemini VLM with structured Pydantic schema (GroundedAnalysisResult).
+    Includes automatic multi-model fallbacks and retries for 503 capacity / network issues.
     """
     if not api_key:
         raise ValueError("API key is missing.")
@@ -119,50 +121,64 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
         system_instruction=GROUNDED_VISION_SYSTEM_PROMPT,
         response_mime_type="application/json",
         response_schema=GroundedAnalysisResult,
-        temperature=0.0,  # Deterministic temperature for maximum precision & zero hallucination
+        temperature=0.0,
         max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
     last_exception = None
     t0 = time.perf_counter()
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
-                config=config,
-            )
 
-            t_elapsed = time.perf_counter() - t0
-            if not response or not response.text:
-                raise ValueError("Received an empty response from Gemini Vision API.")
+    for model_name in VLM_MODELS_ORDER:
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[image, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
+                    config=config,
+                )
 
-            raw_text = clean_json_text(response.text)
-            data = json.loads(raw_text)
-            raw_result = GroundedAnalysisResult.model_validate(data)
-            sanitized = sanitize_bounding_boxes(raw_result)
-            final_res = sanitize_scene_category(sanitized)
-            logger.info(f"[PERF] Grounded VLM analysis completed in {t_elapsed:.3f}s (objects={len(final_res.objects)}, scene={final_res.scene.category}).")
-            return final_res
+                t_elapsed = time.perf_counter() - t0
+                if not response or not response.text:
+                    raise ValueError(f"Received an empty response from Gemini Vision API model '{model_name}'.")
 
-        except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
-            last_exception = e
-            err_str = str(e).lower()
-            is_network_err = (
-                isinstance(e, (socket.gaierror, ConnectionError, TimeoutError))
-                or "getaddrinfo" in err_str
-                or "connection" in err_str
-            )
-            if is_network_err and attempt < max_retries:
-                logger.warning(f"Network glitch on attempt {attempt}/{max_retries}: {e}. Retrying in 1.5s...")
-                time.sleep(1.5)
-                continue
-            else:
-                break
+                raw_text = clean_json_text(response.text)
+                data = json.loads(raw_text)
+                raw_result = GroundedAnalysisResult.model_validate(data)
+                sanitized = sanitize_bounding_boxes(raw_result)
+                final_res = sanitize_scene_category(sanitized)
+                logger.info(f"[PERF] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}, scene={final_res.scene.category}).")
+                return final_res
+
+            except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
+                last_exception = e
+                err_str = str(e).lower()
+                is_transient = (
+                    isinstance(e, (socket.gaierror, ConnectionError, TimeoutError))
+                    or "503" in err_str
+                    or "capacity" in err_str
+                    or "unavailable" in err_str
+                    or "overloaded" in err_str
+                    or "rate" in err_str
+                    or "getaddrinfo" in err_str
+                    or "connection" in err_str
+                    or isinstance(e, APIError)
+                )
+
+                if is_transient and attempt < max_retries:
+                    backoff = attempt * 1.5
+                    logger.warning(f"Transient VLM issue on model '{model_name}' (attempt {attempt}/{max_retries}): {e}. Retrying in {backoff}s...")
+                    time.sleep(backoff)
+                    continue
+                else:
+                    logger.warning(f"Model '{model_name}' failed after attempt {attempt}: {e}. Trying next model fallback...")
+                    break
 
     if last_exception:
         err_msg = str(last_exception)
-        if "getaddrinfo" in err_msg.lower() or isinstance(last_exception, socket.gaierror):
+        err_lower = err_msg.lower()
+        if "503" in err_lower or "capacity" in err_lower or "unavailable" in err_lower:
+            raise ConnectionError("Google Gemini Vision model is currently at maximum server capacity (503). Please wait a few seconds and click Analyze Image again.")
+        elif "getaddrinfo" in err_lower or isinstance(last_exception, socket.gaierror):
             raise ConnectionError("Network connection failed: DNS lookup failed. Please check your internet connection.")
         elif isinstance(last_exception, APIError):
             raise ValueError(f"Gemini API request failed: {last_exception.message}")
