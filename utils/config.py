@@ -27,8 +27,17 @@ FALLBACK_VLM_MODEL: str = "gemini-2.5-flash"
 DEBUG_ANALYSIS: bool = os.getenv("DEBUG_ANALYSIS", "true").lower() in ["true", "1", "yes"]
 
 # Allowed Frontend CORS Origins
-FRONTEND_ORIGINS_ENV: str = os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
-FRONTEND_ORIGINS = [origin.strip() for origin in FRONTEND_ORIGINS_ENV.split(",") if origin.strip()]
-if "*" not in FRONTEND_ORIGINS:
-    FRONTEND_ORIGINS.append("*")
+DEFAULT_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "https://sightai-frontend.vercel.app",
+]
+
+FRONTEND_ORIGINS_ENV: str = os.getenv("FRONTEND_ORIGINS", "").strip()
+if FRONTEND_ORIGINS_ENV:
+    configured_origins = [origin.strip().rstrip("/") for origin in FRONTEND_ORIGINS_ENV.split(",") if origin.strip()]
+    FRONTEND_ORIGINS = list(dict.fromkeys(configured_origins + DEFAULT_ORIGINS))
+else:
+    FRONTEND_ORIGINS = DEFAULT_ORIGINS
 

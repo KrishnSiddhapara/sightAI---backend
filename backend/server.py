@@ -105,6 +105,7 @@ def health_check():
     return {
         "status": "healthy",
         "api_key_configured": is_key_configured,
+        "allowed_origins": FRONTEND_ORIGINS,
         "message": "AI Image Object Identifier backend API is running."
     }
 
