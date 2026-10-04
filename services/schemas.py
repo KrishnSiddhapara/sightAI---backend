@@ -1,7 +1,9 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 class InstanceAttributes(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     clothing: Optional[str] = Field(default="not clearly visible", description="Clothing type/description for person (e.g. 'red t-shirt and jeans'). Use 'not clearly visible' if unknown.")
     clothing_color: Optional[str] = Field(default="not clearly visible", description="Dominant clothing colors belonging ONLY to this specific person instance.")
     pose: Optional[str] = Field(default="unknown", description="Visible pose (e.g. 'standing', 'sitting', 'running', 'unknown').")
@@ -12,33 +14,57 @@ class InstanceAttributes(BaseModel):
     visible_details: Optional[str] = Field(default="none noted", description="Notable visible characteristics belonging strictly to this single physical instance.")
 
 class BoundingBox(BaseModel):
-    x_min: int = Field(ge=0, le=1000, description="Normalized X minimum coordinate (0 to 1000 scale, left edge).")
-    y_min: int = Field(ge=0, le=1000, description="Normalized Y minimum coordinate (0 to 1000 scale, top edge).")
-    x_max: int = Field(ge=0, le=1000, description="Normalized X maximum coordinate (0 to 1000 scale, right edge).")
-    y_max: int = Field(ge=0, le=1000, description="Normalized Y maximum coordinate (0 to 1000 scale, bottom edge).")
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    x_min: int = Field(default=0, description="Normalized X minimum coordinate (0 to 1000 scale, left edge).")
+    y_min: int = Field(default=0, description="Normalized Y minimum coordinate (0 to 1000 scale, top edge).")
+    x_max: int = Field(default=1000, description="Normalized X maximum coordinate (0 to 1000 scale, right edge).")
+    y_max: int = Field(default=1000, description="Normalized Y maximum coordinate (0 to 1000 scale, bottom edge).")
+
+    @field_validator('x_min', 'y_min', 'x_max', 'y_max', mode='before')
+    @classmethod
+    def parse_coordinate(cls, v):
+        if v is None:
+            return 0
+        try:
+            fv = float(v)
+            if 0.0 <= fv <= 1.0:
+                fv = fv * 1000.0
+            iv = int(round(fv))
+            return max(0, min(1000, iv))
+        except (ValueError, TypeError):
+            return 0
 
 class ObjectInstance(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     id: str = Field(description="Unique instance identifier (e.g. 'person_1', 'person_2', 'car_1').")
-    attributes: InstanceAttributes = Field(description="Independent attributes strictly belonging to this single visual instance.")
+    attributes: InstanceAttributes = Field(default_factory=InstanceAttributes, description="Independent attributes strictly belonging to this single visual instance.")
     bounding_box: Optional[BoundingBox] = Field(default=None, description="Normalized 0-1000 bounding box coordinates [x_min, y_min, x_max, y_max] surrounding this specific instance. Return null if localization is uncertain.")
     uncertainty_reason: Optional[str] = Field(default=None, description="Explicit reason if identification or count of this instance is uncertain (e.g. 'Partially occluded behind tree').")
 
 class DetectedObjectCategory(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     name: str = Field(description="Normalized category name in lowercase (e.g. 'person', 'car', 'dog', 'bottle', 'bicycle'). Standardize synonyms like 'automobile' to 'car'.")
-    confirmed_count: int = Field(description="Exact count of clearly visible physical instances in this category. Do not double count or count reflections/posters/shadows.")
+    confirmed_count: int = Field(default=1, description="Exact count of clearly visible physical instances in this category. Do not double count or count reflections/posters/shadows.")
     uncertain_count: int = Field(default=0, description="Count of partially visible or unconfirmed instances that cannot be conclusively verified.")
-    instances: List[ObjectInstance] = Field(default=[], description="Independent instance objects for each detected physical entity.")
+    instances: List[ObjectInstance] = Field(default_factory=list, description="Independent instance objects for each detected physical entity.")
 
 class SceneDescription(BaseModel):
-    category: str = Field(description="Primary scene category as a short 1-3 word label (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document'). Must be a concise title, never a sentence.")
-    environment: str = Field(description="Specific environment description (e.g., 'Indoor office space with wooden desks'). Do not invent specific named venues unless visually proven.")
-    primary_activity: str = Field(description="Primary activity occurring in the scene.")
-    summary: str = Field(description="Concise visual summary of the scene.")
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    category: str = Field(default="General Scene", description="Primary scene category as a short 1-3 word label (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document'). Must be a concise title, never a sentence.")
+    environment: str = Field(default="Environment observed", description="Specific environment description (e.g., 'Indoor office space with wooden desks'). Do not invent specific named venues unless visually proven.")
+    primary_activity: str = Field(default="Primary activity observed", description="Primary activity occurring in the scene.")
+    summary: str = Field(default="Visual summary of the scene", description="Concise visual summary of the scene.")
 
 class GroundedAnalysisResult(BaseModel):
-    objects: List[DetectedObjectCategory] = Field(description="List of detected object categories with verified physical counts and independent instance attributes.")
-    scene: SceneDescription = Field(description="Scene-level understanding grounded strictly in visible evidence.")
-    overall_summary: str = Field(description="Executive summary built strictly from the verified structured objects and scene analysis.")
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    objects: List[DetectedObjectCategory] = Field(default_factory=list, description="List of detected object categories with verified physical counts and independent instance attributes.")
+    scene: SceneDescription = Field(default_factory=SceneDescription, description="Scene-level understanding grounded strictly in visible evidence.")
+    overall_summary: str = Field(default="Executive summary of the image.", description="Executive summary built strictly from the verified structured objects and scene analysis.")
 
 class SourceItem(BaseModel):
     title: str = Field(description="Title of the web source or page.")

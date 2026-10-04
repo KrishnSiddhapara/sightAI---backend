@@ -2,7 +2,7 @@ import json
 import logging
 import time
 import socket
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 # pyrefly: ignore [missing-import]
 from PIL import Image
 # pyrefly: ignore [missing-import]
@@ -13,8 +13,8 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from services.schemas import GroundedAnalysisResult
-from utils.config import MAX_OUTPUT_TOKENS
-from utils.json_utils import clean_json_text
+from utils.config import MAX_OUTPUT_TOKENS, PRIMARY_VLM_MODEL, FALLBACK_VLM_MODEL, ANALYSIS_TIMEOUT
+from utils.json_utils import clean_json_text, normalize_grounded_analysis, format_pydantic_validation_error
 from utils.image_validation import encode_vlm_image_part
 
 logger = logging.getLogger(__name__)
@@ -58,14 +58,47 @@ STEP 5: CONCISE SCENE CLASSIFICATION
 - Classify the primary scene category as a CONCISE 1-3 word title (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document').
 - NEVER return a full sentence or description under 'category'. Put detailed descriptions in 'environment', 'primary_activity', and 'summary'.
 
-STEP 6: IMAGE-WIDE CONSISTENCY CROSS-CHECK
-Before returning the final structured JSON, cross-check:
-A. Is every reported object actually visible in the image?
-B. Is the confirmed count equal to the number of distinct physical instances?
-C. Are attributes assigned strictly to their correct owner entity?
-D. Were any shadows, reflections, or photos inside screens mistakenly counted?
-E. Does every bounding box surround the exact target instance and remain inside valid [0, 1000] boundaries?
-F. Is scene category a concise 1-3 word title?
+STEP 6: STRICT CANONICAL JSON OUTPUT FORMAT
+You MUST output ONLY a single JSON object matching this exact schema:
+{
+  "objects": [
+    {
+      "name": "person",
+      "confirmed_count": 1,
+      "uncertain_count": 0,
+      "instances": [
+        {
+          "id": "person_1",
+          "attributes": {
+            "clothing": "red t-shirt and jeans",
+            "clothing_color": "red",
+            "pose": "standing",
+            "action": "waving",
+            "accessories": "none visible",
+            "object_color": "not clearly visible",
+            "type_or_subtype": "unknown",
+            "visible_details": "none noted"
+          },
+          "bounding_box": {
+            "x_min": 100,
+            "y_min": 150,
+            "x_max": 300,
+            "y_max": 800
+          },
+          "uncertainty_reason": null
+        }
+      ]
+    }
+  ],
+  "scene": {
+    "category": "Street",
+    "environment": "Paved street with sidewalk",
+    "primary_activity": "People walking outdoors",
+    "summary": "Outdoor daytime street scene."
+  },
+  "overall_summary": "Executive visual analysis summary."
+}
+Do not use Markdown fences. Do not output text outside the JSON object.
 """
 
 def sanitize_scene_category(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
@@ -116,23 +149,10 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     instance.bounding_box = None
     return result
 
-from typing import List, Tuple, Optional, Union
-from PIL import Image
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
-
-from services.schemas import GroundedAnalysisResult
-from utils.config import MAX_OUTPUT_TOKENS, PRIMARY_VLM_MODEL, FALLBACK_VLM_MODEL, ANALYSIS_TIMEOUT
-from utils.json_utils import clean_json_text
-from utils.image_validation import encode_vlm_image_part
-
-logger = logging.getLogger(__name__)
-
 def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) -> GroundedAnalysisResult:
     """
     Sends image or pre-encoded Part to Gemini VLM with structured Pydantic schema (GroundedAnalysisResult).
-    Uses PRIMARY_VLM_MODEL and FALLBACK_VLM_MODEL with explicit timeouts and controlled single retries.
+    Uses PRIMARY_VLM_MODEL and FALLBACK_VLM_MODEL with explicit timeouts, normalization, and field-level validation logging.
     """
     if not api_key or api_key == "your_api_key_here":
         raise ValueError("API_KEY_ERROR: Gemini API key (VLM_API_KEY) is missing or unconfigured.")
@@ -158,7 +178,9 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
         max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
-    models_to_try = ["gemini-2.5-flash"]
+    models_to_try = [PRIMARY_VLM_MODEL]
+    if FALLBACK_VLM_MODEL and FALLBACK_VLM_MODEL not in models_to_try:
+        models_to_try.append(FALLBACK_VLM_MODEL)
 
     last_exception = None
     t0 = time.perf_counter()
@@ -178,11 +200,27 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
                     raise ValueError(f"GEMINI_BAD_RESPONSE: Received empty response text from Gemini Vision API model '{model_name}'.")
 
                 raw_text = clean_json_text(response.text)
+                
+                # Step A: Parse JSON safely
                 try:
                     data = json.loads(raw_text)
-                    raw_result = GroundedAnalysisResult.model_validate(data)
+                except Exception as json_parse_err:
+                    logger.error(f"[JSON_PARSE_ERROR] Failed to parse raw Gemini response on model '{model_name}': {json_parse_err}\nRaw text:\n{raw_text[:500]}")
+                    raise ValueError(f"INVALID_JSON: Model '{model_name}' returned malformed JSON output.")
+
+                # Step B: Controlled Normalization Layer
+                normalized_data = normalize_grounded_analysis(data)
+
+                # Step C: GroundedAnalysisResult Pydantic Validation
+                try:
+                    raw_result = GroundedAnalysisResult.model_validate(normalized_data)
                 except Exception as json_err:
-                    logger.warning(f"JSON schema parsing failed on model '{model_name}': {json_err}")
+                    detailed_err = format_pydantic_validation_error(json_err)
+                    logger.error(
+                        f"[SCHEMA_VALIDATION_ERROR] Model '{model_name}' response failed GroundedAnalysisResult validation."
+                        f"\nField-level details:\n{detailed_err}"
+                        f"\nNormalized JSON snippet:\n{json.dumps(normalized_data)[:1000]}"
+                    )
                     raise ValueError(f"SCHEMA_VALIDATION_ERROR: Model '{model_name}' response did not match expected GroundedAnalysisResult schema.")
 
                 sanitized = sanitize_bounding_boxes(raw_result)
@@ -221,6 +259,15 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
                 logger.warning(f"[VLM_WARN] Gemini API error on model '{model_name}' (code={code}, attempt {attempt}/2): {api_err}")
                 if is_capacity and attempt < 2:
                     time.sleep(1.5)
+                    continue
+                break
+
+            except ValueError as val_err:
+                # ValueErrors like SCHEMA_VALIDATION_ERROR or INVALID_JSON from inside the try block
+                last_exception = val_err
+                logger.warning(f"[VLM_WARN] Validation/schema error on model '{model_name}' (attempt {attempt}/2): {val_err}")
+                if attempt < 2:
+                    time.sleep(1.0)
                     continue
                 break
 
