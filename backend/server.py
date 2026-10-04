@@ -236,6 +236,14 @@ async def analyze_endpoint(file: UploadFile = File(...)):
             error_code = "API_KEY_ERROR"
         elif "SCHEMA_VALIDATION_ERROR" in err_msg:
             error_code = "SCHEMA_VALIDATION_ERROR"
+        elif "INVALID_JSON" in err_msg:
+            error_code = "INVALID_JSON"
+        elif "MODEL_OUTPUT_TRUNCATED" in err_msg:
+            error_code = "MODEL_OUTPUT_TRUNCATED"
+        elif "EMPTY_MODEL_RESPONSE" in err_msg:
+            error_code = "EMPTY_MODEL_RESPONSE"
+        elif "SAFETY_BLOCKED" in err_msg:
+            error_code = "SAFETY_BLOCKED"
         elif "INVALID_IMAGE" in err_msg:
             error_code = "INVALID_IMAGE"
 

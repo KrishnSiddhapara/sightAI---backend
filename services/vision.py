@@ -59,7 +59,7 @@ STEP 5: CONCISE SCENE CLASSIFICATION
 - NEVER return a full sentence or description under 'category'. Put detailed descriptions in 'environment', 'primary_activity', and 'summary'.
 
 STEP 6: STRICT CANONICAL JSON OUTPUT FORMAT
-You MUST output ONLY a single JSON object matching this exact schema:
+Return ONLY ONE valid raw JSON object matching this exact schema:
 {
   "objects": [
     {
@@ -98,7 +98,12 @@ You MUST output ONLY a single JSON object matching this exact schema:
   },
   "overall_summary": "Executive visual analysis summary."
 }
-Do not use Markdown fences. Do not output text outside the JSON object.
+CRITICAL RULES:
+- Do NOT use Markdown code block fences (do NOT use ```json or ```).
+- Do NOT output any preamble, text, explanation, or intro before the JSON object.
+- Do NOT output any postamble, notes, or text after the JSON object.
+- Use exact field names defined by the schema. Do NOT rename fields.
+- Return a complete and valid JSON object.
 """
 
 def sanitize_scene_category(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
@@ -196,17 +201,68 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
                 )
 
                 t_elapsed = time.perf_counter() - t0
-                if not response or not response.text:
-                    raise ValueError(f"GEMINI_BAD_RESPONSE: Received empty response text from Gemini Vision API model '{model_name}'.")
 
-                raw_text = clean_json_text(response.text)
+                # Extract metadata from candidate response
+                candidates = getattr(response, "candidates", None) or []
+                cand_count = len(candidates)
+                finish_reason_name = "UNKNOWN"
+                if candidates:
+                    cand_0 = candidates[0]
+                    fr = getattr(cand_0, "finish_reason", None)
+                    if hasattr(fr, "name"):
+                        finish_reason_name = fr.name
+                    elif fr is not None:
+                        finish_reason_name = str(fr)
+
+                raw_resp_text = response.text if response and hasattr(response, "text") else None
+                resp_len = len(raw_resp_text) if raw_resp_text else 0
+                resp_preview = (raw_resp_text[:400] + "...") if raw_resp_text and len(raw_resp_text) > 400 else (raw_resp_text or "<empty>")
+
+                logger.info(
+                    f"[VLM_RESPONSE_METADATA] model='{model_name}' | candidate_count={cand_count} | "
+                    f"finish_reason='{finish_reason_name}' | response_mime='application/json' | "
+                    f"response_length={resp_len} | preview='{resp_preview[:200]}'"
+                )
+
+                # Check for empty response or safety blocks
+                if not raw_resp_text:
+                    if "SAFETY" in finish_reason_name.upper():
+                        raise ValueError(f"SAFETY_BLOCKED: Model '{model_name}' response was blocked by safety filters (finish_reason={finish_reason_name}).")
+                    raise ValueError(f"EMPTY_MODEL_RESPONSE: Received empty candidate response text from Gemini Vision API model '{model_name}' (finish_reason={finish_reason_name}).")
+
+                # Check for response truncation
+                if finish_reason_name.upper() == "MAX_TOKENS":
+                    logger.warning(f"[VLM_TRUNCATED] Model output truncated: model='{model_name}', finish_reason=MAX_TOKENS, len={resp_len}")
+                    raise ValueError(f"MODEL_OUTPUT_TRUNCATED: Model '{model_name}' response was truncated before completion (finish_reason=MAX_TOKENS).")
+
+                # Step A: Clean & Extract JSON
+                extracted_json_text = clean_json_text(raw_resp_text)
                 
-                # Step A: Parse JSON safely
+                # Parse JSON safely with controlled single-attempt recovery
+                data = None
                 try:
-                    data = json.loads(raw_text)
+                    data = json.loads(extracted_json_text)
                 except Exception as json_parse_err:
-                    logger.error(f"[JSON_PARSE_ERROR] Failed to parse raw Gemini response on model '{model_name}': {json_parse_err}\nRaw text:\n{raw_text[:500]}")
-                    raise ValueError(f"INVALID_JSON: Model '{model_name}' returned malformed JSON output.")
+                    # Single controlled recovery attempt: search raw text directly for first '{' and last '}'
+                    first_b = raw_resp_text.find('{')
+                    last_b = raw_resp_text.rfind('}')
+                    if first_b != -1 and last_b != -1 and first_b < last_b:
+                        fallback_slice = raw_resp_text[first_b:last_b+1].strip()
+                        try:
+                            data = json.loads(fallback_slice)
+                            logger.info(f"[JSON_RECOVERY_SUCCESS] Successfully recovered JSON object from raw response on model '{model_name}'")
+                        except Exception:
+                            data = None
+
+                    if data is None:
+                        logger.error(
+                            f"[INVALID_JSON] Failed to parse JSON output on model '{model_name}'. "
+                            f"\nError: {json_parse_err}"
+                            f"\nFinish reason: {finish_reason_name}"
+                            f"\nResponse length: {resp_len}"
+                            f"\nRaw response preview:\n{resp_preview}"
+                        )
+                        raise ValueError(f"INVALID_JSON: Model '{model_name}' returned malformed JSON output.")
 
                 # Step B: Controlled Normalization Layer
                 normalized_data = normalize_grounded_analysis(data)
