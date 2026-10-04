@@ -116,17 +116,39 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     instance.bounding_box = None
     return result
 
-VLM_MODELS_ORDER = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+from typing import List, Tuple, Optional, Union
+from PIL import Image
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 
-def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 2) -> GroundedAnalysisResult:
-    """
-    Sends PIL image to Gemini VLM with structured Pydantic schema (GroundedAnalysisResult).
-    Includes automatic multi-model fallbacks and retries for 503 capacity / network issues.
-    """
-    if not api_key:
-        raise ValueError("API key is missing.")
+from services.schemas import GroundedAnalysisResult
+from utils.config import MAX_OUTPUT_TOKENS, PRIMARY_VLM_MODEL, FALLBACK_VLM_MODEL, ANALYSIS_TIMEOUT
+from utils.json_utils import clean_json_text
+from utils.image_validation import encode_vlm_image_part
 
-    client = genai.Client(api_key=api_key)
+logger = logging.getLogger(__name__)
+
+def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) -> GroundedAnalysisResult:
+    """
+    Sends image or pre-encoded Part to Gemini VLM with structured Pydantic schema (GroundedAnalysisResult).
+    Uses PRIMARY_VLM_MODEL and FALLBACK_VLM_MODEL with explicit timeouts and controlled single retries.
+    """
+    if not api_key or api_key == "your_api_key_here":
+        raise ValueError("API_KEY_ERROR: Gemini API key (VLM_API_KEY) is missing or unconfigured.")
+
+    if isinstance(image, types.Part):
+        image_part = image
+    elif isinstance(image, Image.Image):
+        img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
+        image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+    else:
+        raise ValueError("INVALID_IMAGE: Provided input is not a valid image or Part object.")
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(ANALYSIS_TIMEOUT * 1000))
+    )
 
     config = types.GenerateContentConfig(
         system_instruction=GROUNDED_VISION_SYSTEM_PROMPT,
@@ -136,15 +158,19 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
         max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
+    models_to_try = [PRIMARY_VLM_MODEL]
+    if FALLBACK_VLM_MODEL and FALLBACK_VLM_MODEL != PRIMARY_VLM_MODEL:
+        models_to_try.append(FALLBACK_VLM_MODEL)
+    if "gemini-1.5-flash" not in models_to_try:
+        models_to_try.append("gemini-1.5-flash")
+
     last_exception = None
     t0 = time.perf_counter()
 
-    img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
-    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
-
-    for model_name in VLM_MODELS_ORDER:
-        for attempt in range(1, max_retries + 1):
+    for model_name in models_to_try:
+        for attempt in range(1, 2 + 1):  # Max 1 retry per model
             try:
+                logger.info(f"[VLM_CALL] Invoking model='{model_name}' (attempt {attempt}/2)")
                 response = client.models.generate_content(
                     model=model_name,
                     contents=[image_part, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
@@ -153,53 +179,78 @@ def analyze_image_grounded(image: Image.Image, api_key: str, max_retries: int = 
 
                 t_elapsed = time.perf_counter() - t0
                 if not response or not response.text:
-                    raise ValueError(f"Received an empty response from Gemini Vision API model '{model_name}'.")
+                    raise ValueError(f"GEMINI_BAD_RESPONSE: Received empty response text from Gemini Vision API model '{model_name}'.")
 
                 raw_text = clean_json_text(response.text)
-                data = json.loads(raw_text)
-                raw_result = GroundedAnalysisResult.model_validate(data)
+                try:
+                    data = json.loads(raw_text)
+                    raw_result = GroundedAnalysisResult.model_validate(data)
+                except Exception as json_err:
+                    logger.warning(f"JSON schema parsing failed on model '{model_name}': {json_err}")
+                    raise ValueError(f"SCHEMA_VALIDATION_ERROR: Model '{model_name}' response did not match expected GroundedAnalysisResult schema.")
+
                 sanitized = sanitize_bounding_boxes(raw_result)
                 final_res = sanitize_scene_category(sanitized)
-                logger.info(f"[PERF] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}, scene={final_res.scene.category}).")
+                logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}, scene={final_res.scene.category}).")
                 return final_res
 
-            except (socket.gaierror, ConnectionError, TimeoutError, APIError, Exception) as e:
-                last_exception = e
-                err_str = str(e).lower()
-                is_transient = (
-                    isinstance(e, (socket.gaierror, ConnectionError, TimeoutError))
-                    or "503" in err_str
-                    or "capacity" in err_str
-                    or "unavailable" in err_str
-                    or "overloaded" in err_str
-                    or "rate" in err_str
-                    or "getaddrinfo" in err_str
-                    or "connection" in err_str
-                    or isinstance(e, APIError)
-                )
-
-                if is_transient and attempt < max_retries:
-                    backoff = attempt * 1.5
-                    logger.warning(f"Transient VLM issue on model '{model_name}' (attempt {attempt}/{max_retries}): {e}. Retrying in {backoff}s...")
-                    time.sleep(backoff)
+            except (socket.gaierror, ConnectionError) as net_err:
+                last_exception = net_err
+                logger.warning(f"[VLM_WARN] Network connection error on model '{model_name}' (attempt {attempt}/2): {net_err}")
+                if attempt < 2:
+                    time.sleep(1.5)
                     continue
-                else:
-                    logger.warning(f"Model '{model_name}' failed after attempt {attempt}: {e}. Trying next model fallback...")
-                    break
+                break
+
+            except TimeoutError as to_err:
+                last_exception = to_err
+                logger.warning(f"[VLM_WARN] Timeout error on model '{model_name}' (attempt {attempt}/2): {to_err}")
+                if attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                break
+
+            except APIError as api_err:
+                last_exception = api_err
+                err_msg = str(api_err).lower()
+                code = getattr(api_err, "code", None)
+
+                if code == 401 or "api key" in err_msg or "unauthorized" in err_msg:
+                    raise ValueError(f"API_KEY_ERROR: Invalid Gemini API key provided. ({api_err.message})")
+
+                if code == 400 and "part exceeded" not in err_msg:
+                    raise ValueError(f"INVALID_REQUEST: {api_err.message}")
+
+                is_capacity = code in [503, 429] or "capacity" in err_msg or "overloaded" in err_msg or "rate" in err_msg
+                logger.warning(f"[VLM_WARN] Gemini API error on model '{model_name}' (code={code}, attempt {attempt}/2): {api_err}")
+                if is_capacity and attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                break
+
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"[VLM_WARN] Exception on model '{model_name}' (attempt {attempt}/2): {e}")
+                if attempt < 2:
+                    time.sleep(1.0)
+                    continue
+                break
 
     if last_exception:
-        err_msg = str(last_exception)
-        err_lower = err_msg.lower()
-        if "503" in err_lower or "capacity" in err_lower or "unavailable" in err_lower:
-            raise ConnectionError("Google Gemini Vision model is currently at maximum server capacity (503). Please wait a few seconds and click Analyze Image again.")
-        elif "getaddrinfo" in err_lower or isinstance(last_exception, socket.gaierror):
-            raise ConnectionError("Network connection failed: DNS lookup failed. Please check your internet connection.")
-        elif isinstance(last_exception, APIError):
-            raise ValueError(f"Gemini API request failed: {last_exception.message}")
+        err_str = str(last_exception)
+        err_lower = err_str.lower()
+        if "503" in err_lower or "capacity" in err_lower or "unavailable" in err_lower or "overloaded" in err_lower:
+            raise ConnectionError("GEMINI_CAPACITY: Google Gemini Vision model is currently at maximum server capacity (503). Please wait a few seconds and try again.")
+        elif "timeout" in err_lower or isinstance(last_exception, TimeoutError):
+            raise TimeoutError(f"GEMINI_TIMEOUT: Gemini VLM request timed out after {ANALYSIS_TIMEOUT}s. Please try again.")
+        elif "getaddrinfo" in err_lower or isinstance(last_exception, (socket.gaierror, ConnectionError)):
+            raise ConnectionError("NETWORK_ERROR: Network connection failed during Gemini API call. Please check your internet connection.")
+        elif "api_key_error" in err_lower or "invalid_request" in err_lower or "schema_validation_error" in err_lower or "gemini_bad_response" in err_lower:
+            raise ValueError(err_str)
         else:
-            raise ValueError(f"Failed to perform visual analysis: {err_msg}")
+            raise ValueError(f"INTERNAL_ERROR: Failed to perform visual analysis ({err_str}).")
 
-    raise ValueError("Unexpected error during visual analysis.")
+    raise ValueError("INTERNAL_ERROR: Unexpected error during visual analysis.")
 
 def parse_vlm_response(response_text: str) -> Tuple[List[str], str]:
     """

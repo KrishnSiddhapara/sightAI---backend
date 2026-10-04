@@ -15,8 +15,8 @@ from fastapi.responses import JSONResponse
 from PIL import Image
 
 # Import existing core Python AI service modules & utilities
-from utils.image_validation import validate_image_file, compute_image_hash, optimize_image_for_analysis
-from utils.config import MAX_ANALYSIS_DIMENSION, ANALYSIS_TIMEOUT
+from utils.image_validation import validate_image_file, compute_image_hash, optimize_image_for_analysis, encode_vlm_image_part
+from utils.config import MAX_ANALYSIS_DIMENSION, ANALYSIS_TIMEOUT, FRONTEND_ORIGINS
 from services.safety import check_image_safety
 from services.vision import analyze_image_grounded
 from services.user_query import answer_image_query
@@ -38,16 +38,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for frontend integration (React Vite dev server at http://localhost:5173)
-allowed_origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "*"
-]
-
+# Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,55 +129,67 @@ async def analyze_endpoint(file: UploadFile = File(...)):
     safety_result = None
 
     try:
+        t0_read = time.perf_counter()
         content_bytes = await file.read()
         filename = file.filename or "uploaded_image.jpg"
-        
-        logger.info(f"[{req_id}] [UPLOAD] Image received '{filename}' ({len(content_bytes)/(1024*1024):.2f} MB)")
+        t_upload = time.perf_counter() - t0_read
+
+        size_mb = len(content_bytes) / (1024 * 1024)
+        logger.info(f"[{req_id}] [UPLOAD] Received '{filename}' ({size_mb:.2f} MB)")
 
         # Step 1: Decode & validate original image
         t0_decode = time.perf_counter()
         pil_img = parse_and_validate_file(filename, content_bytes)
         t_decode = time.perf_counter() - t0_decode
-        logger.info(f"[{req_id}] [VALIDATION] Image decoding & validation completed in {t_decode:.3f}s")
-        
+        orig_w, orig_h = pil_img.size
+        logger.info(f"[{req_id}] [IMAGE] Original: {size_mb:.2f} MB ({orig_w}x{orig_h})")
+
         api_key = get_api_key()
 
-        # Step 2: Optimize image for VLM analysis
+        # Step 2: Preprocess & encode VLM image part ONCE for both safety and vision calls
         t0_opt = time.perf_counter()
-        orig_w, orig_h = pil_img.size
-        analysis_img = optimize_image_for_analysis(pil_img, MAX_ANALYSIS_DIMENSION)
-        opt_w, opt_h = analysis_img.size
+        vlm_bytes, mime_type, opt_w, opt_h = encode_vlm_image_part(pil_img, MAX_ANALYSIS_DIMENSION)
+        image_part = types.Part.from_bytes(data=vlm_bytes, mime_type=mime_type)
         t_opt = time.perf_counter() - t0_opt
 
-        logger.info(f"[{req_id}] [PREPROCESSING] Image optimized ({orig_w}x{orig_h} -> {opt_w}x{opt_h}) in {t_opt:.3f}s")
+        logger.info(f"[{req_id}] [ANALYSIS IMAGE] Dimensions: {opt_w}x{opt_h}, JPEG size: {len(vlm_bytes)/1024:.1f} KB, MIME: {mime_type} (prep time: {t_opt:.3f}s)")
 
-        # Step 3: Safety Gate Pre-screening
+        # Step 3: Safety Gate Pre-screening (uses pre-encoded image_part)
         t0_safety = time.perf_counter()
-        safety_result = check_image_safety(analysis_img, api_key)
+        safety_result = check_image_safety(image_part, api_key)
         t_safety = time.perf_counter() - t0_safety
-        logger.info(f"[{req_id}] [SAFETY] Safety screening completed (is_safe={safety_result.get('is_safe')}) in {t_safety:.3f}s")
-        
+        logger.info(f"[{req_id}] [SAFETY] Screening completed (is_safe={safety_result.get('is_safe')}) in {t_safety:.3f}s")
+
         if not safety_result.get("is_safe", False):
-            logger.warning(f"[{req_id}] [SAFETY_FLAGGED] Image rejected after {time.perf_counter() - t_start:.3f}s: {safety_result.get('category')}")
+            logger.warning(f"[{req_id}] [SAFETY_FLAGGED] Image rejected: {safety_result.get('category')}")
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
                     "success": False,
                     "request_id": req_id,
+                    "error_code": safety_result.get("error_code") or "SAFETY_FLAGGED",
                     "error": safety_result.get("error") or "Image rejected by safety screening gate.",
                     "safety": safety_result
                 }
             )
 
-        # Step 4: Grounded VLM Analysis
+        # Step 4: Grounded VLM Analysis (uses pre-encoded image_part)
         t0_vlm = time.perf_counter()
         logger.info(f"[{req_id}] [VLM_REQUEST] Sending multimodal request to Gemini VLM API")
-        grounded_result: GroundedAnalysisResult = analyze_image_grounded(analysis_img, api_key)
+        grounded_result: GroundedAnalysisResult = analyze_image_grounded(image_part, api_key)
         t_vlm = time.perf_counter() - t0_vlm
         t_total = time.perf_counter() - t_start
 
-        logger.info(f"[{req_id}] [VLM_RESPONSE] Grounded analysis received in {t_vlm:.3f}s (Objects={len(grounded_result.objects)}, Scene='{grounded_result.scene.category}')")
-        logger.info(f"[{req_id}] [FINAL_RESPONSE] Total pipeline execution time: {t_total:.3f}s")
+        logger.info(
+            f"[{req_id}] [PERF_BREAKDOWN] "
+            f"UPLOAD: {t_upload:.3f}s | "
+            f"VALIDATION: {t_decode:.3f}s | "
+            f"PREPROCESSING: {t_opt:.3f}s | "
+            f"SAFETY: {t_safety:.3f}s | "
+            f"VISION: {t_vlm:.3f}s | "
+            f"TOTAL: {t_total:.3f}s"
+        )
+        logger.info(f"[{req_id}] [FINAL_RESPONSE] Result ready (Objects={len(grounded_result.objects)}, Scene='{grounded_result.scene.category}')")
 
         return {
             "success": True,
@@ -194,8 +200,11 @@ async def analyze_endpoint(file: UploadFile = File(...)):
             "performance": {
                 "total_seconds": round(t_total, 3),
                 "vlm_seconds": round(t_vlm, 3),
+                "safety_seconds": round(t_safety, 3),
+                "preprocessing_seconds": round(t_opt, 3),
                 "original_dimensions": [orig_w, orig_h],
-                "analysis_dimensions": [opt_w, opt_h]
+                "analysis_dimensions": [opt_w, opt_h],
+                "image_bytes_kb": round(len(vlm_bytes) / 1024, 1)
             }
         }
     except HTTPException as http_ex:
@@ -206,19 +215,37 @@ async def analyze_endpoint(file: UploadFile = File(...)):
             content={
                 "success": False,
                 "request_id": req_id,
+                "error_code": "HTTP_ERROR",
                 "error": http_ex.detail,
                 "safety": safety_result
             }
         )
-    except Exception as e:
+    except (TimeoutError, ConnectionError, ValueError, Exception) as e:
         t_total = time.perf_counter() - t_start
-        logger.error(f"[{req_id}] [VLM_ERROR] Exception during analysis after {t_total:.3f}s: {e}")
+        err_msg = str(e)
+        error_code = "INTERNAL_ERROR"
+
+        if "GEMINI_TIMEOUT" in err_msg or isinstance(e, TimeoutError):
+            error_code = "GEMINI_TIMEOUT"
+        elif "GEMINI_CAPACITY" in err_msg:
+            error_code = "GEMINI_CAPACITY"
+        elif "NETWORK_ERROR" in err_msg or isinstance(e, ConnectionError):
+            error_code = "NETWORK_ERROR"
+        elif "API_KEY_ERROR" in err_msg:
+            error_code = "API_KEY_ERROR"
+        elif "SCHEMA_VALIDATION_ERROR" in err_msg:
+            error_code = "SCHEMA_VALIDATION_ERROR"
+        elif "INVALID_IMAGE" in err_msg:
+            error_code = "INVALID_IMAGE"
+
+        logger.error(f"[{req_id}] [VLM_ERROR] ({error_code}) after {t_total:.3f}s: {err_msg}")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "success": False,
                 "request_id": req_id,
-                "error": f"Image analysis encountered an error ({str(e)}). Please retry.",
+                "error_code": error_code,
+                "error": f"Image analysis encountered an issue ({err_msg}). Please retry.",
                 "safety": safety_result
             }
         )
