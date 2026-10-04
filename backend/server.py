@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse
 from PIL import Image
+from google.genai import types
 
 # Import existing core Python AI service modules & utilities
 from utils.image_validation import validate_image_file, compute_image_hash, optimize_image_for_analysis, encode_vlm_image_part
