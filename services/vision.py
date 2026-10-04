@@ -158,11 +158,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
         max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
-    models_to_try = [PRIMARY_VLM_MODEL]
-    if FALLBACK_VLM_MODEL and FALLBACK_VLM_MODEL != PRIMARY_VLM_MODEL:
-        models_to_try.append(FALLBACK_VLM_MODEL)
-    if "gemini-1.5-flash" not in models_to_try:
-        models_to_try.append("gemini-1.5-flash")
+    models_to_try = ["gemini-2.5-flash"]
 
     last_exception = None
     t0 = time.perf_counter()

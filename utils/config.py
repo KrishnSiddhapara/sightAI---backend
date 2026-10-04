@@ -17,11 +17,11 @@ MAX_OUTPUT_TOKENS: int = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
 # Request timeout limit in seconds
 ANALYSIS_TIMEOUT: float = float(os.getenv("ANALYSIS_TIMEOUT", "120.0"))
 
-# Primary VLM model configurable via .env (default: gemini-2.5-flash)
+# Primary VLM model (strictly gemini-2.5-flash)
 PRIMARY_VLM_MODEL: str = os.getenv("VLM_MODEL", "gemini-2.5-flash").strip()
 
-# Fallback VLM model if primary model experiences 503 capacity issues
-FALLBACK_VLM_MODEL: str = os.getenv("FALLBACK_VLM_MODEL", "gemini-2.0-flash").strip()
+# Fallback model set strictly to gemini-2.5-flash
+FALLBACK_VLM_MODEL: str = "gemini-2.5-flash"
 
 # Debug logging flag
 DEBUG_ANALYSIS: bool = os.getenv("DEBUG_ANALYSIS", "true").lower() in ["true", "1", "yes"]

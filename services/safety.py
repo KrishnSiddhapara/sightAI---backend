@@ -127,9 +127,7 @@ def check_image_safety(image: Union[Image.Image, types.Part], api_key: str) -> D
         max_output_tokens=512,
     )
 
-    models_to_try = [PRIMARY_VLM_MODEL]
-    if FALLBACK_VLM_MODEL and FALLBACK_VLM_MODEL != PRIMARY_VLM_MODEL:
-        models_to_try.append(FALLBACK_VLM_MODEL)
+    models_to_try = ["gemini-2.5-flash"]
 
     last_error_detail = None
 
