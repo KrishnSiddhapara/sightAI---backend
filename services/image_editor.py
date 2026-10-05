@@ -135,10 +135,10 @@ def edit_image(
     if is_ambiguous and ambiguity_msg:
         raise ValueError(ambiguity_msg)
 
-    # Step 1: Optimize source image to strictly remain below 800KB (1024KB Gemini API Part limit)
+    # Step 1: Optimize source image to strictly remain below 6144KB (6 MB limit)
     t0_opt = time.perf_counter()
     orig_w, orig_h = image.size
-    img_bytes, mime_type, opt_w, opt_h = encode_vlm_image_part(image, max_dim=1536, max_bytes=800 * 1024)
+    img_bytes, mime_type, opt_w, opt_h = encode_vlm_image_part(image, max_dim=2048, max_bytes=6144 * 1024)
     image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
     t_opt = time.perf_counter() - t0_opt
 

@@ -5,16 +5,23 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Known domain classification maps
+OFFICIAL_DOMAINS = {
+    'samsung.com', 'apple.com', 'nike.com', 'adidas.co.in', 'adidas.com', 'puma.com',
+    'sony.co.in', 'sony.com', 'oneplus.in', 'oneplus.com', 'realme.com', 'mi.com', 'xiaomi.in',
+    'hp.com', 'dell.com', 'lenovo.com', 'asus.com', 'canon.co.in', 'nikon.co.in', 'decathlon.in'
+}
+
 RETAILER_DOMAINS = {
     'amazon.com', 'amazon.in', 'amazon.co.uk', 'amazon.ca', 'amazon.de',
     'walmart.com', 'target.com', 'ebay.com', 'bestbuy.com', 'flipkart.com',
+    'myntra.com', 'croma.com', 'reliancedigital.in', 'tatacliq.com', 'nykaa.com',
+    'decathlon.in', 'ajio.com', 'jiomart.com', 'blinkit.com', 'zepto.com', 'meesho.com',
     'bookswagon.com', 'barnesandnoble.com', 'abebooks.com', 'etsy.com'
 }
 
 REFERENCE_DOMAINS = {
     'wikipedia.org', 'en.wikipedia.org', 'britannica.com', 'goodreads.com',
-    'imdb.com', 'github.com', 'arxiv.org'
+    'imdb.com', 'github.com', 'arxiv.org', 'gadgets360.com', 'gsmarena.com'
 }
 
 PUBLISHER_DOMAINS = {
@@ -36,6 +43,8 @@ def extract_domain(url_str: str) -> str:
 def classify_source_type(url_str: str, title: str = "", snippet: str = "") -> str:
     domain = extract_domain(url_str)
     
+    if any(off in domain for off in OFFICIAL_DOMAINS):
+        return "official"
     if any(pub in domain for pub in PUBLISHER_DOMAINS):
         return "publisher"
     if any(ret in domain for ret in RETAILER_DOMAINS):
@@ -43,10 +52,10 @@ def classify_source_type(url_str: str, title: str = "", snippet: str = "") -> st
     if any(ref in domain for ref in REFERENCE_DOMAINS):
         return "reference"
     
-    # Check official hints
+    # Check official hints in text
     lower_title = title.lower()
     lower_snippet = snippet.lower()
-    if "official site" in lower_title or "official website" in lower_title or "official site" in lower_snippet:
+    if "official site" in lower_title or "official website" in lower_title or "official site" in lower_snippet or "official store" in lower_title:
         return "official"
         
     return "general"

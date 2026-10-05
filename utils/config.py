@@ -5,8 +5,8 @@ import os
 # Maximum upload file size limit for general image analysis (in MB)
 MAX_UPLOAD_SIZE_MB: float = float(os.getenv("MAX_UPLOAD_SIZE_MB", "10.0"))
 
-# Maximum upload file size limit for AI Image Editing (in MB and Bytes)
-AI_EDITOR_MAX_IMAGE_SIZE_MB: float = float(os.getenv("AI_EDITOR_MAX_IMAGE_SIZE_MB", "5.0"))
+# Maximum upload file size limit for AI Image Editing (in MB and Bytes, default 6.0 MB = 6144 KB)
+AI_EDITOR_MAX_IMAGE_SIZE_MB: float = float(os.getenv("AI_EDITOR_MAX_IMAGE_SIZE_MB", "6.0"))
 AI_EDITOR_MAX_IMAGE_SIZE_BYTES: int = int(AI_EDITOR_MAX_IMAGE_SIZE_MB * 1024 * 1024)
 
 # Maximum pixel dimension (width or height) for VLM image analysis optimization.

@@ -40,30 +40,43 @@ def optimize_image_for_analysis(img: Image.Image, max_dim: int = MAX_ANALYSIS_DI
     resample_filter = getattr(Image.Resampling, 'LANCZOS', Image.LANCZOS)
     return img.resize((new_width, new_height), resample_filter)
 
-def encode_vlm_image_part(img: Image.Image, max_dim: int = MAX_ANALYSIS_DIMENSION, max_bytes: int = 800 * 1024) -> Tuple[bytes, str, int, int]:
+def encode_vlm_image_part(img: Image.Image, max_dim: int = MAX_ANALYSIS_DIMENSION, max_bytes: int = 6144 * 1024) -> Tuple[bytes, str, int, int]:
     """
-    Encodes a PIL Image into optimized JPEG bytes guaranteed to stay below max_bytes (800KB).
-    This strictly prevents 'Part exceeded maximum size of 1024KB' errors when transmitting
-    multimodal image content parts to Google GenAI / Gemini VLM endpoints.
+    Encodes a PIL Image into optimized JPEG bytes guaranteed to stay below max_bytes (up to 6144KB / 6MB).
+    Strictly prevents 'Part exceeded maximum size' errors when transmitting multimodal content.
     
     Returns:
         (jpeg_bytes, mime_type, width, height)
     """
-    optimized = optimize_image_for_analysis(img, max_dim=max_dim)
+    if img is None:
+        return b"", "image/jpeg", 0, 0
+
+    curr_dim = max_dim
+    optimized = optimize_image_for_analysis(img, max_dim=curr_dim)
     width, height = optimized.size
     rgb_img = optimized.convert("RGB") if optimized.mode != "RGB" else optimized
 
-    quality = ANALYSIS_IMAGE_QUALITY  # Default 85
     buffer = io.BytesIO()
 
-    while quality >= 40:
-        buffer.seek(0)
-        buffer.truncate(0)
-        rgb_img.save(buffer, format="JPEG", quality=quality, optimize=True)
-        size_bytes = buffer.tell()
-        if size_bytes <= max_bytes:
+    while True:
+        quality = ANALYSIS_IMAGE_QUALITY  # Default 85
+        while quality >= 30:
+            buffer.seek(0)
+            buffer.truncate(0)
+            rgb_img.save(buffer, format="JPEG", quality=quality, optimize=True)
+            size_bytes = buffer.tell()
+            if size_bytes <= max_bytes:
+                break
+            quality -= 10
+
+        if size_bytes <= max_bytes or curr_dim <= 400:
             break
-        quality -= 10
+
+        # If quality down to 30 still exceeds max_bytes, downscale dimensions and retry
+        curr_dim = int(curr_dim * 0.85)
+        optimized = optimize_image_for_analysis(img, max_dim=curr_dim)
+        width, height = optimized.size
+        rgb_img = optimized.convert("RGB") if optimized.mode != "RGB" else optimized
 
     buffer.seek(0)
     return buffer.read(), "image/jpeg", width, height
