@@ -87,6 +87,18 @@ class TestImageEditorService(unittest.TestCase):
         self.assertIsInstance(edited, Image.Image)
         self.assertEqual(edited.size, (100, 100))
 
+    def test_prepare_image_for_edit_large_image(self):
+        """Test that prepare_image_for_edit optimizes large high-res images to strictly stay below 900 KB (and under Gemini's 1024KB limit)."""
+        from utils.image_validation import prepare_image_for_edit
+        large_img = Image.new("RGB", (3500, 2500), color="red")
+        
+        final_bytes, mime_type, w, h = prepare_image_for_edit(large_img, target_max_bytes=900 * 1024)
+        
+        self.assertEqual(mime_type, "image/jpeg")
+        self.assertLessEqual(len(final_bytes), 900 * 1024)
+        self.assertLessEqual(len(final_bytes), 1024 * 1024) # Strictly under Gemini 1024 KB transport limit
+        self.assertLessEqual(max(w, h), 2048)
+
     def test_edit_image_missing_key(self):
         """Test edit_image raises ValueError if API key is missing."""
         with self.assertRaises(ValueError):

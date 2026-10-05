@@ -5,9 +5,12 @@ import os
 # Maximum upload file size limit for general image analysis (in MB)
 MAX_UPLOAD_SIZE_MB: float = float(os.getenv("MAX_UPLOAD_SIZE_MB", "10.0"))
 
-# Maximum upload file size limit for AI Image Editing (in MB and Bytes, default 6.0 MB = 6144 KB)
-AI_EDITOR_MAX_IMAGE_SIZE_MB: float = float(os.getenv("AI_EDITOR_MAX_IMAGE_SIZE_MB", "6.0"))
+# Maximum upload file size limit for AI Image Editing (User Upload Limit: 5.0 MB)
+AI_EDITOR_MAX_IMAGE_SIZE_MB: float = float(os.getenv("AI_EDITOR_MAX_IMAGE_SIZE_MB", "5.0"))
 AI_EDITOR_MAX_IMAGE_SIZE_BYTES: int = int(AI_EDITOR_MAX_IMAGE_SIZE_MB * 1024 * 1024)
+
+# Safe Gemini Transport Part Limit (in Bytes: 900 KB target to strictly stay under Gemini 1024 KB inline Part limit)
+GEMINI_PART_SAFE_LIMIT_BYTES: int = 900 * 1024
 
 # Maximum pixel dimension (width or height) for VLM image analysis optimization.
 MAX_ANALYSIS_DIMENSION: int = int(os.getenv("MAX_ANALYSIS_DIMENSION", "1536"))

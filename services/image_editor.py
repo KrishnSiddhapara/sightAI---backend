@@ -14,7 +14,8 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from services.schemas import GroundedAnalysisResult
-from utils.image_validation import encode_vlm_image_part
+from utils.config import GEMINI_PART_SAFE_LIMIT_BYTES
+from utils.image_validation import prepare_image_for_edit
 
 logger = logging.getLogger(__name__)
 
@@ -135,17 +136,23 @@ def edit_image(
     if is_ambiguous and ambiguity_msg:
         raise ValueError(ambiguity_msg)
 
-    # Step 1: Optimize source image to strictly remain below 6144KB (6 MB limit)
+    # Step 1: Centralized Image Preparation & Hard Pre-flight Check
     t0_opt = time.perf_counter()
-    orig_w, orig_h = image.size
-    img_bytes, mime_type, opt_w, opt_h = encode_vlm_image_part(image, max_dim=2048, max_bytes=6144 * 1024)
-    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+    img_bytes, mime_type, opt_w, opt_h = prepare_image_for_edit(
+        image,
+        target_max_bytes=GEMINI_PART_SAFE_LIMIT_BYTES,
+        initial_max_dim=2048
+    )
     t_opt = time.perf_counter() - t0_opt
 
-    logger.info(
-        f"[IMAGE_EDIT_OPT] Original: {orig_w}x{orig_h} -> Optimized: {opt_w}x{opt_h} | "
-        f"Byte size: {len(img_bytes)/1024:.1f} KB | MIME: {mime_type} (prep: {t_opt:.3f}s)"
-    )
+    # PRE-FLIGHT HARD ASSERTION: Never call Gemini if payload >= 1000 KB (1024 KB Gemini API Part limit)
+    payload_size_bytes = len(img_bytes)
+    SAFE_CEILING_BYTES = 1000 * 1024
+    if payload_size_bytes >= SAFE_CEILING_BYTES:
+        logger.error(f"[IMAGE_EDIT_ERROR] Payload size ({payload_size_bytes/1024:.1f} KB) exceeds safe Gemini 1024KB limit!")
+        raise ValueError(f"IMAGE_PAYLOAD_TOO_LARGE: Prepared image size ({payload_size_bytes/1024:.1f} KB) exceeds safe Gemini 1024KB limit.")
+
+    input_image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
 
     client = genai.Client(api_key=api_key)
     full_prompt = build_editing_prompt(instruction, vision_context)
@@ -163,15 +170,19 @@ def edit_image(
         for attempt in range(1, max_retries + 1):
             try:
                 t0_model = time.perf_counter()
-                logger.info(f"Attempting image edit with model '{model_name}' (Attempt {attempt}/{max_retries})...")
+                logger.info(
+                    f"[GEMINI_IMAGE_EDIT] Starting edit request with model '{model_name}' "
+                    f"(Attempt {attempt}/{max_retries}) | Payload size: {payload_size_bytes/1024:.1f} KB"
+                )
                 
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=[image_part, full_prompt],
+                    contents=[input_image_part, full_prompt],
                     config=config,
                 )
 
                 t_edit_dur = time.perf_counter() - t0_model
+                logger.info(f"[GEMINI_IMAGE_EDIT] Response received from model '{model_name}' in {t_edit_dur:.3f}s")
 
                 if not response or not response.candidates:
                     raise ValueError(f"No response candidates returned from model '{model_name}'.")
@@ -181,22 +192,22 @@ def edit_image(
                     finish_reason = getattr(candidate, "finish_reason", "UNKNOWN")
                     raise ValueError(f"Empty content from image editor (Finish reason: {finish_reason}).")
 
-                # Look for inline_data containing image bytes
-                image_part = None
+                # Look for inline_data containing image bytes (DO NOT shadow input_image_part)
+                out_image_part = None
                 for part in candidate.content.parts:
                     if getattr(part, "inline_data", None) and part.inline_data.data:
-                        image_part = part
+                        out_image_part = part
                         break
 
-                if not image_part:
+                if not out_image_part:
                     # If model returned text instead of an image
                     text_parts = [part.text for part in candidate.content.parts if getattr(part, "text", None)]
                     text_msg = " ".join(text_parts).strip() if text_parts else "No image output part returned."
                     raise ValueError(f"Model did not return a generated image: {text_msg}")
 
                 # Decode bytes into PIL Image
-                image_bytes = image_part.inline_data.data
-                edited_pil = Image.open(io.BytesIO(image_bytes))
+                out_bytes = out_image_part.inline_data.data
+                edited_pil = Image.open(io.BytesIO(out_bytes))
                 edited_pil.load()
 
                 # Ensure RGB mode
@@ -208,7 +219,7 @@ def edit_image(
                 if width <= 0 or height <= 0:
                     raise ValueError("Generated image has invalid zero dimensions.")
 
-                logger.info(f"Image edit succeeded with '{model_name}': size={edited_pil.size}, mode={edited_pil.mode}")
+                logger.info(f"[IMAGE_EDIT_SUCCESS] Image edit succeeded with '{model_name}': size={edited_pil.size}, mode={edited_pil.mode}")
                 return edited_pil
 
             except (socket.gaierror, ConnectionError, TimeoutError) as e:

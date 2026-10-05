@@ -40,10 +40,10 @@ def optimize_image_for_analysis(img: Image.Image, max_dim: int = MAX_ANALYSIS_DI
     resample_filter = getattr(Image.Resampling, 'LANCZOS', Image.LANCZOS)
     return img.resize((new_width, new_height), resample_filter)
 
-def encode_vlm_image_part(img: Image.Image, max_dim: int = MAX_ANALYSIS_DIMENSION, max_bytes: int = 6144 * 1024) -> Tuple[bytes, str, int, int]:
+def encode_vlm_image_part(img: Image.Image, max_dim: int = MAX_ANALYSIS_DIMENSION, max_bytes: int = 800 * 1024) -> Tuple[bytes, str, int, int]:
     """
-    Encodes a PIL Image into optimized JPEG bytes guaranteed to stay below max_bytes (up to 6144KB / 6MB).
-    Strictly prevents 'Part exceeded maximum size' errors when transmitting multimodal content.
+    Encodes a PIL Image into optimized JPEG bytes guaranteed to stay below max_bytes (default 800KB).
+    Strictly prevents 'Part exceeded maximum size of 1024KB' errors when transmitting multimodal content.
     
     Returns:
         (jpeg_bytes, mime_type, width, height)
@@ -83,6 +83,84 @@ def encode_vlm_image_part(img: Image.Image, max_dim: int = MAX_ANALYSIS_DIMENSIO
 
 import logging
 logger = logging.getLogger(__name__)
+
+def prepare_image_for_edit(
+    img: Image.Image,
+    target_max_bytes: int = 900 * 1024,
+    initial_max_dim: int = 2048,
+    max_attempts: int = 6
+) -> Tuple[bytes, str, int, int]:
+    """
+    Centralized Image Edit Optimizer.
+    Adaptively optimizes any original input image (up to 5MB user upload) into a compliant
+    JPEG byte payload strictly <= target_max_bytes (900 KB) before transmitting to Gemini.
+    
+    Guarantees that the payload wrapped in types.Part will never exceed Gemini's 1024KB limit.
+    """
+    if img is None:
+        return b"", "image/jpeg", 0, 0
+
+    orig_w, orig_h = img.size
+    orig_estimated_mb = (orig_w * orig_h * 3) / (1024 * 1024)
+
+    logger.info(
+        f"[IMAGE_EDIT_INPUT]\n"
+        f"Original dimensions: {orig_w}x{orig_h}\n"
+        f"Original estimated binary size: ~{orig_estimated_mb:.2f} MB"
+    )
+
+    curr_dim = initial_max_dim if max(orig_w, orig_h) > initial_max_dim else max(orig_w, orig_h)
+    buffer = io.BytesIO()
+    
+    attempt_count = 0
+    final_bytes = b""
+    final_w, final_h = orig_w, orig_h
+    used_quality = 85
+
+    while attempt_count < max_attempts:
+        attempt_count += 1
+        optimized = optimize_image_for_analysis(img, max_dim=curr_dim)
+        final_w, final_h = optimized.size
+        rgb_img = optimized.convert("RGB") if optimized.mode != "RGB" else optimized
+
+        used_quality = 90
+        while used_quality >= 35:
+            buffer.seek(0)
+            buffer.truncate(0)
+            rgb_img.save(buffer, format="JPEG", quality=used_quality, optimize=True)
+            size_bytes = buffer.tell()
+            if size_bytes <= target_max_bytes:
+                break
+            used_quality -= 10
+
+        buffer.seek(0)
+        final_bytes = buffer.read()
+        if len(final_bytes) <= target_max_bytes:
+            break
+
+        # If quality down to 35 still exceeds target_max_bytes, scale down dimensions and retry
+        curr_dim = int(curr_dim * 0.82)
+
+    final_size_kb = len(final_bytes) / 1024
+    base64_size_kb = (len(final_bytes) * 4 / 3) / 1024
+
+    logger.info(
+        f"[IMAGE_EDIT_OPTIMIZATION]\n"
+        f"Output dimensions: {final_w}x{final_h}\n"
+        f"Output format: JPEG\n"
+        f"Output quality: Q{used_quality}\n"
+        f"Output binary size: {final_size_kb:.1f} KB\n"
+        f"Base64 size: {base64_size_kb:.1f} KB\n"
+        f"Estimated Gemini Part size: {final_size_kb:.1f} KB"
+    )
+
+    is_safe_transport = len(final_bytes) < 1000 * 1024
+    logger.info(
+        f"[IMAGE_EDIT_REQUEST]\n"
+        f"Final Gemini payload size: {final_size_kb:.1f} KB (Safe transport: {is_safe_transport})"
+    )
+
+    return final_bytes, "image/jpeg", final_w, final_h
 
 def prepare_ask_ai_image_part(img: Image.Image, max_dim: int = 2048, max_bytes: int = 900 * 1024) -> Tuple[bytes, str, int, int]:
     """
