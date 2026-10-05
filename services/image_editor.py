@@ -153,6 +153,7 @@ def edit_image(
     config = types.GenerateContentConfig(
         system_instruction=IMAGE_EDIT_SYSTEM_PROMPT,
         temperature=0.3,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     models_to_try = [PRIMARY_IMAGE_EDIT_MODEL] + FALLBACK_IMAGE_EDIT_MODELS

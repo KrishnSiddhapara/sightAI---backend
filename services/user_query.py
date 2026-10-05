@@ -50,6 +50,7 @@ def answer_image_query(image: Image.Image, user_prompt: str, api_key: str, max_r
     config = types.GenerateContentConfig(
         system_instruction=USER_QUERY_SYSTEM_PROMPT,
         temperature=0.2,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     img_bytes, mime_type, _, _ = encode_vlm_image_part(image)

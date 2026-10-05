@@ -125,6 +125,7 @@ def check_image_safety(image: Union[Image.Image, types.Part], api_key: str) -> D
         safety_settings=native_safety_settings,
         temperature=0.0,
         max_output_tokens=512,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     models_to_try = ["gemini-2.5-flash"]

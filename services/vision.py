@@ -183,6 +183,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
         response_schema=GroundedAnalysisResult,
         temperature=0.0,
         max_output_tokens=MAX_OUTPUT_TOKENS,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     models_to_try = [PRIMARY_VLM_MODEL]
@@ -193,14 +194,18 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
     t0 = time.perf_counter()
 
     for model_name in models_to_try:
-        for attempt in range(1, 2 + 1):  # Max 1 retry per model
+        for attempt in range(1, 2 + 1):  # Max 2 attempts per model
             try:
                 # On retry after MAX_TOKENS, use a hyper-concise user prompt instruction
                 if attempt == 1:
-                    user_prompt = "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."
+                    user_prompt = "Perform strict visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."
                 else:
-                    user_prompt = "CONCISE RETRY: The previous output exceeded token limits. Return the required JSON schema using EXTREMELY concise 1-3 word attribute values, limit object categories to the top 12 most prominent items, and keep scene summary under 15 words. Do not list trivial background micro-objects or write explanatory paragraphs inside attributes."
+                    user_prompt = "CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, limit object categories to top 10 most prominent items, and keep scene summary under 15 words. Do NOT list trivial background micro-objects or write prose descriptions inside attributes."
 
+                logger.info(
+                    f"[VLM_CONFIG] model='{model_name}' | attempt={attempt}/2 | max_output_tokens={MAX_OUTPUT_TOKENS} | "
+                    f"response_mime='application/json' | tools_enabled=False | automatic_function_calling=False"
+                )
                 logger.info(f"[VLM_CALL] Invoking model='{model_name}' (attempt {attempt}/2)")
                 response = client.models.generate_content(
                     model=model_name,
