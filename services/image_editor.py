@@ -14,6 +14,7 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from services.schemas import GroundedAnalysisResult
+from utils.image_validation import encode_vlm_image_part
 
 logger = logging.getLogger(__name__)
 
@@ -117,21 +118,7 @@ def edit_image(
 ) -> Image.Image:
     """
     Performs generative AI image editing on a PIL Image using Google GenAI SDK.
-    
-    Args:
-        image: Source PIL Image to edit.
-        instruction: Natural language prompt describing desired image change.
-        api_key: Google Gemini API key.
-        vision_context: Optional GroundedAnalysisResult from vision analysis.
-        max_retries: Maximum attempt count per model.
-        
-    Returns:
-        Modified PIL Image object.
-        
-    Raises:
-        ValueError: On invalid input, missing API key, or empty/corrupted response.
-        ConnectionError: On DNS / network failure.
-        RuntimeError: On API failure across all models.
+    Optimizes input image adaptively to stay strictly below 800 KB (1024 KB limit).
     """
     if not api_key or api_key == "your_api_key_here":
         raise ValueError("API key is missing or invalid.")
@@ -148,6 +135,18 @@ def edit_image(
     if is_ambiguous and ambiguity_msg:
         raise ValueError(ambiguity_msg)
 
+    # Step 1: Optimize source image to strictly remain below 800KB (1024KB Gemini API Part limit)
+    t0_opt = time.perf_counter()
+    orig_w, orig_h = image.size
+    img_bytes, mime_type, opt_w, opt_h = encode_vlm_image_part(image, max_dim=1536, max_bytes=800 * 1024)
+    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+    t_opt = time.perf_counter() - t0_opt
+
+    logger.info(
+        f"[IMAGE_EDIT_OPT] Original: {orig_w}x{orig_h} -> Optimized: {opt_w}x{opt_h} | "
+        f"Byte size: {len(img_bytes)/1024:.1f} KB | MIME: {mime_type} (prep: {t_opt:.3f}s)"
+    )
+
     client = genai.Client(api_key=api_key)
     full_prompt = build_editing_prompt(instruction, vision_context)
 
@@ -162,13 +161,16 @@ def edit_image(
     for model_name in models_to_try:
         for attempt in range(1, max_retries + 1):
             try:
+                t0_model = time.perf_counter()
                 logger.info(f"Attempting image edit with model '{model_name}' (Attempt {attempt}/{max_retries})...")
                 
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=[image, full_prompt],
+                    contents=[image_part, full_prompt],
                     config=config,
                 )
+
+                t_edit_dur = time.perf_counter() - t0_model
 
                 if not response or not response.candidates:
                     raise ValueError(f"No response candidates returned from model '{model_name}'.")

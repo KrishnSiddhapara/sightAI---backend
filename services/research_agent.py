@@ -20,7 +20,7 @@ from utils.json_utils import clean_json_text
 
 logger = logging.getLogger(__name__)
 
-INTENT_DETECTION_SYSTEM_PROMPT = """You are SightAI's Intent Classification & Query Planning Engine.
+INTENT_DETECTION_SYSTEM_PROMPT = """You are SightAI's Advanced Intent Classification & Query Planning Engine.
 Your task is to examine the user's question, previous conversation history, and available image context, and classify the user's intent:
 
 INTENT CATEGORIES:
@@ -29,21 +29,21 @@ INTENT CATEGORIES:
 3. PRODUCT_IDENTIFICATION: Identifying an item or product model shown in the image. Set requires_research=false unless model details are ambiguous.
 4. PRODUCT_PRICE: Current pricing info, deals, or market rates. Set requires_research=true.
 5. PRODUCT_AVAILABILITY: Retailers, stock, or purchasing options. Set requires_research=true.
-6. PRODUCT_SPECIFICATION: Technical specs, processor, RAM, materials. Set requires_research=true.
-7. PRODUCT_COMPARISON: Comparing the image item with another product (e.g. "Compare this with iPhone 17"). Set requires_research=true.
-8. PURCHASE_RESEARCH: Where to buy, deals, regional purchasing. Set requires_research=true.
-9. LATEST_INFORMATION: Latest release, current news, updates. Set requires_research=true.
+6. PRODUCT_SPECIFICATION: Technical specs, processor, RAM, materials, dimensions. Set requires_research=true.
+7. PRODUCT_COMPARISON: Comparing the image item with another product (e.g. "Compare this with iPhone 17 Pro"). Set requires_research=true.
+8. PURCHASE_RESEARCH: Where to buy, deals, official stores. Set requires_research=true.
+9. LATEST_INFORMATION: Latest release, current news, updates, announcements. Set requires_research=true.
 10. COMPANY_RESEARCH: Manufacturer / publisher official company info. Set requires_research=true.
 11. PERSON_RESEARCH: Public figures, authors, creators. Set requires_research=true if external info needed.
 12. BOOK_RESEARCH: Book author, publisher, ISBN, availability. Set requires_research=true for purchasing/prices.
 13. MOVIE_RESEARCH: Film cast, release date, streaming availability. Set requires_research=true.
 14. LOCATION_RESEARCH: Landmark history, address, travel details. Set requires_research=true.
-15. TECHNICAL_RESEARCH: Documentation or technical specs. Set requires_research=true.
+15. TECHNICAL_RESEARCH: Frameworks, libraries, documentation, APIs. Set requires_research=true.
 16. NEWS_RESEARCH: Recent news events. Set requires_research=true.
 17. OTHER: Any other request.
 
-IMPORTANT RULE FOR CONVERSATION CONTEXT:
-- Resolve pronouns like "its price", "that phone", "where to buy it" by looking at previous conversation turns and detected visual entities.
+CRITICAL RULES:
+- Resolve pronouns like "its price", "that phone", "where to buy it" using previous conversation turns and detected visual entities.
 - Extract structured entity details (brand, model, variant, category) whenever present.
 - If research is required, construct a concise 3-6 word search query.
 """
@@ -72,16 +72,17 @@ INTENT_RESPONSE_SCHEMA = {
     "required": ["intent", "requires_research", "search_query"]
 }
 
-RESEARCH_SYNTHESIS_SYSTEM_PROMPT = """You are SightAI's Enterprise AI Research Agent.
+RESEARCH_SYNTHESIS_SYSTEM_PROMPT = """You are SightAI's Advanced Enterprise AI Research Agent.
 Your priority is GROUNDED TRUTH, ZERO HALLUCINATION, AND CLEAR SOURCE ATTRIBUTION.
 
 RULES:
 1. Synthesize a concise, clear, and structured response using ONLY the provided Web Search Evidence and Image Context.
 2. DO NOT invent fake URLs, prices, stock availability, or store names.
-3. For pricing or availability, explicitly state the current listed prices from search evidence, and recommend verifying live details directly at the source links.
-4. If multiple prices or conflicting sources are found, explain the differences clearly (e.g., manufacturer price vs retailer pricing).
-5. Format your response using clean Markdown with headings, bullet points, and key facts.
-6. Do NOT expose internal reasoning or tool execution traces.
+3. For pricing or availability, explicitly state current listed prices from search evidence, and recommend verifying live details directly at source links.
+4. If multiple prices or conflicting sources are found, explain the differences clearly (e.g., manufacturer MSRP vs retailer pricing).
+5. For PRODUCT_COMPARISON or comparison queries, format a clean Markdown comparison table comparing key features/specs, followed by a 'Best for' recommendation section.
+6. Format your response using clean Markdown with clear headings and bullet points.
+7. Do NOT expose internal reasoning or tool execution traces.
 """
 
 def execute_agent_research(request: AgentResearchRequest, api_key: str) -> AgentResearchResponse:
@@ -96,9 +97,8 @@ def execute_agent_research(request: AgentResearchRequest, api_key: str) -> Agent
     question = request.question.strip()
     image_ctx = request.image_context or {}
     conv_hist = request.conversation_history or []
-    region = request.user_region
 
-    logger.info(f"[ResearchAgent] Processing query: '{question}' (Region: {region or 'Global'})")
+    logger.info(f"[ResearchAgent] Processing query: '{question}'")
 
     # Step 1: Intent & Entity Router
     intent_config = types.GenerateContentConfig(
@@ -110,7 +110,6 @@ def execute_agent_research(request: AgentResearchRequest, api_key: str) -> Agent
 
     context_prompt = f"""User Question: "{question}"
 Image Analysis Context: {json.dumps(image_ctx, indent=2)}
-Regional Preference: {region or 'Global'}
 Previous Conversation Turns: {json.dumps(conv_hist, indent=2)}
 
 Determine the intent, resolve entity references, and generate a search query if external research is required.
@@ -183,14 +182,7 @@ Answer the user's question directly, clearly, and concisely based strictly on vi
     used_tools.append("web_search")
     web_tool = WebSearchTool()
 
-    # Apply regional modifier if specified
-    full_query = f"{search_query} {region}".strip() if region else search_query
-    search_results = web_tool.execute(full_query, max_results=6)
-
-    # Fallback without regional qualifier if zero results
-    if not search_results and region:
-        logger.info(f"[ResearchAgent] Retrying web search without region qualifier...")
-        search_results = web_tool.execute(search_query, max_results=6)
+    search_results = web_tool.execute(search_query, max_results=6)
 
     seen_urls = set()
     raw_sources_for_prompt = []
@@ -241,7 +233,6 @@ Answer the user's question directly, clearly, and concisely based strictly on vi
     synthesis_prompt = f"""User Question: "{question}"
 Intent Category: {intent_str}
 Resolved Entity: {entity_obj.model_dump_json() if entity_obj else 'None'}
-Regional Context: {region or 'Global'}
 
 Web Search Evidence ({len(collected_sources)} sources):
 {json.dumps(raw_sources_for_prompt, indent=2)}
@@ -264,8 +255,8 @@ Provide a clear, grounded answer to the user's question using the verified searc
 
         final_answer = synth_res.text.strip() if synth_res and synth_res.text else "Unable to synthesize answer from external sources."
         
-        # Build research summary message
-        res_summary = f"Researched '{search_query}' across {len(collected_sources)} external sources."
+        res_summary = f"Researched '{search_query}' across {len(collected_sources)} verified external sources."
+        confidence_val = "high" if len(collected_sources) >= 2 else ("medium" if len(collected_sources) == 1 else "low")
 
         return AgentResearchResponse(
             success=True,
@@ -276,7 +267,7 @@ Provide a clear, grounded answer to the user's question using the verified searc
             facts=extracted_facts,
             used_tools=used_tools,
             sources=collected_sources,
-            confidence="high" if len(collected_sources) > 0 else "medium",
+            confidence=confidence_val,
             research_summary=res_summary
         )
     except Exception as synth_err:

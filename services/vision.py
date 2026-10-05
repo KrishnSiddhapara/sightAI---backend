@@ -54,9 +54,9 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION
 - The bounding box MUST tightly surround that specific object instance.
 - If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER invent fake or estimated coordinates!
 
-STEP 5: CONCISE SCENE CLASSIFICATION
-- Classify the primary scene category as a CONCISE 1-3 word title (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document').
-- NEVER return a full sentence or description under 'category'. Put detailed descriptions in 'environment', 'primary_activity', and 'summary'.
+STEP 5: SCENE UNDERSTANDING & DESCRIPTION
+- Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
+- Ground all scene observations strictly in visible features.
 
 STEP 6: STRICT CANONICAL JSON OUTPUT FORMAT
 Return ONLY ONE valid raw JSON object matching this exact schema:
