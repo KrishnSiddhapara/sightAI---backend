@@ -44,16 +44,19 @@ STEP 3: INDEPENDENT PERSON-BY-PERSON & INSTANCE ATTRIBUTE EXTRACTION
 - ATTRIBUTES MUST BE CONCISE 1-4 WORD PHRASES (e.g. clothing='red t-shirt and jeans', pose='standing', action='waving'). NEVER write long prose, paragraphs, explanations, or commentary inside attribute fields!
 - If an attribute (e.g. exact clothing, pose, action, age, brand) is not clearly visible, return "not clearly visible" or "unknown". DO NOT guess!
 
-STEP 4: GROUNDED BOUNDING BOX LOCALIZATION
-- For EVERY confidently identified physical instance, provide bounding box coordinates in 'bounding_box': {"x_min": int, "y_min": int, "x_max": int, "y_max": int}.
-- Use normalized 0 to 1000 integer coordinates where:
-  * x_min: Leftmost edge of the object (0 = left boundary of image, 1000 = right boundary of image)
-  * y_min: Topmost edge of the object (0 = top boundary of image, 1000 = bottom boundary of image)
-  * x_max: Rightmost edge of the object (0 to 1000)
-  * y_max: Bottommost edge of the object (0 to 1000)
-- Ensure x_min < x_max and y_min < y_max.
-- The bounding box MUST tightly surround that specific object instance.
-- If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER invent fake or estimated coordinates!
+STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
+- For EVERY confidently identified physical object instance, provide bounding box coordinates in 'bounding_box': {"x_min": float, "y_min": float, "x_max": float, "y_max": float} in normalized 0 to 1000 scale:
+  * x_min = Leftmost horizontal edge of the object (0 = left image boundary, 1000 = right image boundary)
+  * y_min = Topmost vertical edge of the object (0 = top image boundary, 1000 = bottom image boundary)
+  * x_max = Rightmost horizontal edge of the object (0 to 1000, MUST be > x_min)
+  * y_max = Bottommost vertical edge of the object (0 to 1000, MUST be > y_min)
+- CRITICAL BOUNDING BOX ACCURACY RULES:
+  1. TIGHT FIT: The bounding box MUST tightly surround the visible physical extent of that specific object. Do NOT include unnecessary surrounding background space.
+  2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure horizontal left-to-right position; y_min and y_max measure vertical top-to-bottom position.
+  3. INDEPENDENT INSTANCES: Each physical instance (e.g., person_1, person_2, bottle_1, bottle_2) MUST have its own separate, independently calculated bounding box. NEVER copy or duplicate bounding box coordinates across different objects.
+  4. SMALL OBJECTS: For small items (e.g. phones, cups, balls, distant people), ensure the box is compact and tightly fitted to the object bounds.
+  5. OCCLUSION & BOUNDARIES: Enclose only the visible physical extent of the object. Do not invent bounding boxes for non-existent objects or areas outside the image frame.
+  6. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER return fake or estimated coordinates!
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
@@ -82,10 +85,10 @@ Return ONLY ONE valid raw JSON object matching this exact schema:
             "visible_details": "none noted"
           },
           "bounding_box": {
-            "x_min": 100,
-            "y_min": 150,
-            "x_max": 300,
-            "y_max": 800
+            "x_min": 100.0,
+            "y_min": 150.0,
+            "x_max": 300.0,
+            "y_max": 800.0
           },
           "uncertainty_reason": null
         }
@@ -111,17 +114,17 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
     """
     Validates and sanitizes bounding boxes across all object instances.
     Auto-repairs inverted coordinates (x_min > x_max or y_min > y_max) using min/max,
-    ensures boundaries are within [0, 1000], and discards boxes with zero/tiny area (< 5px).
+    ensures boundaries are within [0, 1000], and discards boxes with zero/tiny area (< 2px in 1000 scale).
     """
     for category in result.objects:
         for instance in category.instances:
             bbox = instance.bounding_box
             if bbox is not None:
                 try:
-                    x1 = max(0, min(1000, int(bbox.x_min)))
-                    y1 = max(0, min(1000, int(bbox.y_min)))
-                    x2 = max(0, min(1000, int(bbox.x_max)))
-                    y2 = max(0, min(1000, int(bbox.y_max)))
+                    x1 = max(0.0, min(1000.0, float(bbox.x_min)))
+                    y1 = max(0.0, min(1000.0, float(bbox.y_min)))
+                    x2 = max(0.0, min(1000.0, float(bbox.x_max)))
+                    y2 = max(0.0, min(1000.0, float(bbox.y_max)))
 
                     x_min = min(x1, x2)
                     x_max = max(x1, x2)
@@ -129,13 +132,13 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     y_max = max(y1, y2)
 
                     # Ensure box has minimum visible dimension (at least 5 units in 1000 scale)
-                    if (x_max - x_min) >= 5 and (y_max - y_min) >= 5:
-                        bbox.x_min = x_min
-                        bbox.y_min = y_min
-                        bbox.x_max = x_max
-                        bbox.y_max = y_max
+                    if (x_max - x_min) >= 5.0 and (y_max - y_min) >= 5.0:
+                        bbox.x_min = round(x_min, 2)
+                        bbox.y_min = round(y_min, 2)
+                        bbox.x_max = round(x_max, 2)
+                        bbox.y_max = round(y_max, 2)
                     else:
-                        logger.warning(f"Discarding zero-area bounding box for instance {instance.id}: [{x_min}, {y_min}, {x_max}, {y_max}]")
+                        logger.warning(f"Discarding tiny/zero-area bounding box for instance {instance.id}: [{x_min}, {y_min}, {x_max}, {y_max}]")
                         instance.bounding_box = None
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Invalid bounding box types for instance {instance.id}: {e}")

@@ -16,24 +16,23 @@ class InstanceAttributes(BaseModel):
 class BoundingBox(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    x_min: int = Field(default=0, description="Normalized X minimum coordinate (0 to 1000 scale, left edge).")
-    y_min: int = Field(default=0, description="Normalized Y minimum coordinate (0 to 1000 scale, top edge).")
-    x_max: int = Field(default=1000, description="Normalized X maximum coordinate (0 to 1000 scale, right edge).")
-    y_max: int = Field(default=1000, description="Normalized Y maximum coordinate (0 to 1000 scale, bottom edge).")
+    x_min: float = Field(default=0.0, description="Normalized X minimum coordinate (0 to 1000 scale, left edge).")
+    y_min: float = Field(default=0.0, description="Normalized Y minimum coordinate (0 to 1000 scale, top edge).")
+    x_max: float = Field(default=1000.0, description="Normalized X maximum coordinate (0 to 1000 scale, right edge).")
+    y_max: float = Field(default=1000.0, description="Normalized Y maximum coordinate (0 to 1000 scale, bottom edge).")
 
     @field_validator('x_min', 'y_min', 'x_max', 'y_max', mode='before')
     @classmethod
     def parse_coordinate(cls, v):
         if v is None:
-            return 0
+            return 0.0
         try:
             fv = float(v)
             if 0.0 <= fv <= 1.0:
                 fv = fv * 1000.0
-            iv = int(round(fv))
-            return max(0, min(1000, iv))
+            return max(0.0, min(1000.0, round(fv, 2)))
         except (ValueError, TypeError):
-            return 0
+            return 0.0
 
 class ObjectInstance(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
