@@ -94,11 +94,18 @@ def get_api_key() -> str:
         )
     return key
 
-def parse_and_validate_file(filename: str, content_bytes: bytes) -> Image.Image:
+from utils.config import MAX_ANALYSIS_DIMENSION, ANALYSIS_TIMEOUT, FRONTEND_ORIGINS, AI_EDITOR_MAX_IMAGE_SIZE_MB, AI_EDITOR_MAX_IMAGE_SIZE_BYTES
+
+def parse_and_validate_file(filename: str, content_bytes: bytes, max_size_mb: float = 10.0) -> Image.Image:
     """Uses existing validate_image_file utility to validate and extract PIL Image."""
     dummy_file = DummyUploadedFile(filename, content_bytes)
-    is_valid, err_msg, pil_img = validate_image_file(dummy_file, max_size_mb=10.0)
+    is_valid, err_msg, pil_img = validate_image_file(dummy_file, max_size_mb=max_size_mb)
     if not is_valid or pil_img is None:
+        if "exceeds" in (err_msg or "").lower() or len(content_bytes) > max_size_mb * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image is too large. Please upload an image smaller than {int(max_size_mb)} MB."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=err_msg or "Invalid image file."
@@ -313,7 +320,7 @@ async def edit_image_endpoint(
     
     if file is not None:
         content_bytes = await file.read()
-        pil_img = parse_and_validate_file(file.filename or "input.jpg", content_bytes)
+        pil_img = parse_and_validate_file(file.filename or "input.jpg", content_bytes, max_size_mb=AI_EDITOR_MAX_IMAGE_SIZE_MB)
     elif image_base64 is not None:
         try:
             pil_img = base64_to_pil(image_base64)

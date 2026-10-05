@@ -72,17 +72,30 @@ INTENT_RESPONSE_SCHEMA = {
     "required": ["intent", "requires_research", "search_query"]
 }
 
-RESEARCH_SYNTHESIS_SYSTEM_PROMPT = """You are SightAI's Advanced Enterprise AI Research Agent.
-Your priority is GROUNDED TRUTH, ZERO HALLUCINATION, AND CLEAR SOURCE ATTRIBUTION.
+RESEARCH_SYNTHESIS_SYSTEM_PROMPT = """You are SightAI's Advanced General AI Assistant & Enterprise Research Agent, inspired by top AI assistants (ChatGPT/Gemini).
 
-RULES:
-1. Synthesize a concise, clear, and structured response using ONLY the provided Web Search Evidence and Image Context.
-2. DO NOT invent fake URLs, prices, stock availability, or store names.
-3. For pricing or availability, explicitly state current listed prices from search evidence, and recommend verifying live details directly at source links.
-4. If multiple prices or conflicting sources are found, explain the differences clearly (e.g., manufacturer MSRP vs retailer pricing).
-5. For PRODUCT_COMPARISON or comparison queries, format a clean Markdown comparison table comparing key features/specs, followed by a 'Best for' recommendation section.
-6. Format your response using clean Markdown with clear headings and bullet points.
-7. Do NOT expose internal reasoning or tool execution traces.
+CORE BEHAVIOR & ANSWER DEPTH POLICY:
+1. ADAPTIVE ANSWER DEPTH:
+   - Match answer depth to question complexity.
+   - Simple trivial questions (e.g. "What is 2+2?", "What color is this shirt?") get a direct, simple response.
+   - Technical, conceptual, programming, AI/ML, product, or general knowledge questions (e.g. "What is RAG?", "Explain FastAPI", "How does Docker work?", "Compare React vs Vue") MUST receive a COMPLETE, WELL-STRUCTURED, DETAILED EXPLANATION.
+   - For knowledge & technical questions, use a rich structure where applicable:
+     * Overview / Direct Answer
+     * Detailed Explanation & Core Concepts
+     * How It Works / Workflow
+     * Code Example or Practical Demonstration (when applicable)
+     * Key Advantages & Trade-offs / Limitations
+     * Practical Use Cases & Best Practices
+2. RICH MARKDOWN FORMATTING:
+   - Use Markdown headers (`##`, `###`), bold terms, bullet points, numbered lists, comparison tables (`| Feature | Product A | Product B |`), and formatted code blocks (```python, ```javascript, etc.) to make responses highly readable.
+3. GROUNDING & SOURCE ATTRIBUTION:
+   - Synthesize truth grounded in verified Search Evidence and Image Context. Never invent fake URLs, prices, stock availability, specifications, or citations.
+   - For pricing/availability, explicitly list available prices and recommend verifying live details at source links.
+   - Include clickable Markdown links `[Source Title](URL)` to verified sources when web research was performed.
+4. CONVERSATION CONTEXT:
+   - Resolve pronouns ("it", "that phone", "its price") using previous turns and identified visual entities without requiring the user to repeat context.
+5. NO META-COMMENTARY:
+   - Do NOT expose internal reasoning, tool traces, or chain-of-thought to the user.
 """
 
 def execute_agent_research(request: AgentResearchRequest, api_key: str) -> AgentResearchResponse:
@@ -105,7 +118,9 @@ def execute_agent_research(request: AgentResearchRequest, api_key: str) -> Agent
         system_instruction=INTENT_DETECTION_SYSTEM_PROMPT,
         response_mime_type="application/json",
         response_schema=INTENT_RESPONSE_SCHEMA,
-        temperature=0.0
+        temperature=0.0,
+        max_output_tokens=1024,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     context_prompt = f"""User Question: "{question}"
@@ -150,20 +165,28 @@ Determine the intent, resolve entity references, and generate a search query if 
             confidence=0.95
         )
 
-    # Case A: Visual Question or General Knowledge -> No external web research needed
+    # Case A: Visual Question or General Knowledge -> Direct LLM Answer with adaptive depth
     if not requires_research or not search_query:
+        direct_config = types.GenerateContentConfig(
+            system_instruction=RESEARCH_SYNTHESIS_SYSTEM_PROMPT,
+            temperature=0.2,
+            max_output_tokens=4096,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
         visual_prompt = f"""User Question: "{question}"
 Intent Category: {intent_str}
+Resolved Entity: {entity_obj.model_dump_json() if entity_obj else 'None'}
 Image Analysis Context: {json.dumps(image_ctx, indent=2)}
-Previous Turns: {json.dumps(conv_hist, indent=2)}
+Previous Conversation History: {json.dumps(conv_hist, indent=2)}
 
-Answer the user's question directly, clearly, and concisely based strictly on visual context and general knowledge.
+Provide a complete, structured, and detailed response appropriate for the question complexity. Use headings, markdown formatting, bullet points, and code examples when helpful.
 """
         ans_res = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[visual_prompt]
+            contents=[visual_prompt],
+            config=direct_config,
         )
-        final_ans = ans_res.text.strip() if ans_res and ans_res.text else "Information not visible in image."
+        final_ans = ans_res.text.strip() if ans_res and ans_res.text else "Information not available."
         
         return AgentResearchResponse(
             success=True,
@@ -175,7 +198,7 @@ Answer the user's question directly, clearly, and concisely based strictly on vi
             used_tools=[],
             sources=[],
             confidence="high",
-            research_summary="Answered directly from visual context and existing knowledge."
+            research_summary="Answered directly using intelligent general knowledge and visual context."
         )
 
     # Case B: External Research Required -> Execute Web Search Tool
@@ -227,7 +250,9 @@ Answer the user's question directly, clearly, and concisely based strictly on vi
     # Step 3: Synthesis & Fact Extraction
     synthesis_config = types.GenerateContentConfig(
         system_instruction=RESEARCH_SYNTHESIS_SYSTEM_PROMPT,
-        temperature=0.2
+        temperature=0.2,
+        max_output_tokens=4096,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     synthesis_prompt = f"""User Question: "{question}"
