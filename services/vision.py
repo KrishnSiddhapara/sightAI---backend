@@ -28,6 +28,7 @@ STEP 1: FULL IMAGE SCAN & ENTITY DETECTION
 - Scan the entire image for distinct, visually observable physical entities.
 - Distinguish between real physical objects in the 3D scene vs reflections in mirrors/glass, shadows on surfaces, or pictures shown inside posters/TV screens/paintings.
 - DO NOT count reflections, shadows, or images shown inside screens/posters/photos as real physical objects.
+- OBJECT CATEGORY CONTROL: Detect up to a maximum of 15 primary, clearly visible physical object categories. Do NOT produce an endless list of trivial background micro-objects (such as individual leaves, tiny pebbles, or distant background specks).
 
 STEP 2: PHYSICAL INSTANCE COUNTING & DEDUPLICATION
 - Count distinct physical instances.
@@ -40,7 +41,7 @@ STEP 2: PHYSICAL INSTANCE COUNTING & DEDUPLICATION
 STEP 3: INDEPENDENT PERSON-BY-PERSON & INSTANCE ATTRIBUTE EXTRACTION
 - EVERY person instance (person_1, person_2, person_3, etc.) MUST be analyzed independently based strictly on their visible spatial region.
 - NEVER create a generic description and copy it to multiple people.
-- If Person 1 wears a red shirt and Person 2 wears a blue jacket, Person 1 MUST have clothing_color='red' and Person 2 MUST have clothing_color='blue'. NEVER share or copy attributes across entities!
+- ATTRIBUTES MUST BE CONCISE 1-4 WORD PHRASES (e.g. clothing='red t-shirt and jeans', pose='standing', action='waving'). NEVER write long prose, paragraphs, explanations, or commentary inside attribute fields!
 - If an attribute (e.g. exact clothing, pose, action, age, brand) is not clearly visible, return "not clearly visible" or "unknown". DO NOT guess!
 
 STEP 4: GROUNDED BOUNDING BOX LOCALIZATION
@@ -56,6 +57,7 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
+- Keep descriptions concise (1-2 clear factual sentences, max 25 words).
 - Ground all scene observations strictly in visible features.
 
 STEP 6: STRICT CANONICAL JSON OUTPUT FORMAT
@@ -193,10 +195,16 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
     for model_name in models_to_try:
         for attempt in range(1, 2 + 1):  # Max 1 retry per model
             try:
+                # On retry after MAX_TOKENS, use a hyper-concise user prompt instruction
+                if attempt == 1:
+                    user_prompt = "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."
+                else:
+                    user_prompt = "CONCISE RETRY: The previous output exceeded token limits. Return the required JSON schema using EXTREMELY concise 1-3 word attribute values, limit object categories to the top 12 most prominent items, and keep scene summary under 15 words. Do not list trivial background micro-objects or write explanatory paragraphs inside attributes."
+
                 logger.info(f"[VLM_CALL] Invoking model='{model_name}' (attempt {attempt}/2)")
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=[image_part, "Perform strict step-by-step visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."],
+                    contents=[image_part, user_prompt],
                     config=config,
                 )
 
@@ -221,7 +229,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
                 logger.info(
                     f"[VLM_RESPONSE_METADATA] model='{model_name}' | candidate_count={cand_count} | "
                     f"finish_reason='{finish_reason_name}' | response_mime='application/json' | "
-                    f"response_length={resp_len} | preview='{resp_preview[:200]}'"
+                    f"max_output_tokens={MAX_OUTPUT_TOKENS} | response_length={resp_len} | preview='{resp_preview[:200]}'"
                 )
 
                 # Check for empty response or safety blocks
@@ -232,7 +240,10 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
 
                 # Check for response truncation
                 if finish_reason_name.upper() == "MAX_TOKENS":
-                    logger.warning(f"[VLM_TRUNCATED] Model output truncated: model='{model_name}', finish_reason=MAX_TOKENS, len={resp_len}")
+                    logger.warning(f"[VLM_TRUNCATED] Model output truncated on attempt {attempt}/2: model='{model_name}', finish_reason=MAX_TOKENS, len={resp_len}")
+                    if attempt == 1:
+                        # Continue loop to execute concise retry on attempt 2
+                        continue
                     raise ValueError(f"MODEL_OUTPUT_TRUNCATED: Model '{model_name}' response was truncated before completion (finish_reason=MAX_TOKENS).")
 
                 # Step A: Clean & Extract JSON
