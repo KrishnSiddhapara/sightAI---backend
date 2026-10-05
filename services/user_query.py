@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types
 # pyrefly: ignore [missing-import]
 from google.genai.errors import APIError
-from utils.image_validation import encode_vlm_image_part
+from utils.image_validation import prepare_ask_ai_image_part
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def answer_image_query(image: Image.Image, user_prompt: str, api_key: str, max_r
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
+    img_bytes, mime_type, _, _ = prepare_ask_ai_image_part(image)
     image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
 
     last_exception = None

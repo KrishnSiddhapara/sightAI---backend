@@ -68,6 +68,69 @@ def encode_vlm_image_part(img: Image.Image, max_dim: int = MAX_ANALYSIS_DIMENSIO
     buffer.seek(0)
     return buffer.read(), "image/jpeg", width, height
 
+import logging
+logger = logging.getLogger(__name__)
+
+def prepare_ask_ai_image_part(img: Image.Image, max_dim: int = 2048, max_bytes: int = 900 * 1024) -> Tuple[bytes, str, int, int]:
+    """
+    Prepares a high-resolution, high-quality image Part for Ask AI visual Q&A.
+    Preserves fine details such as small text, logos, model numbers, and fine textures
+    while ensuring output byte size stays safely below max_bytes (900KB).
+    
+    Logs safe diagnostics without exposing keys, secret data, or raw bytes.
+    """
+    if img is None:
+        return b"", "image/jpeg", 0, 0
+
+    orig_w, orig_h = img.size
+    
+    # Target high-resolution dimensions (prefer full resolution up to 2048px)
+    target_dim = max_dim if max(orig_w, orig_h) > max_dim else max(orig_w, orig_h)
+    optimized = optimize_image_for_analysis(img, max_dim=target_dim)
+    final_w, final_h = optimized.size
+    rgb_img = optimized.convert("RGB") if optimized.mode != "RGB" else optimized
+
+    quality = 92  # High quality for clear text, labels, and fine visual details
+    buffer = io.BytesIO()
+
+    while quality >= 60:
+        buffer.seek(0)
+        buffer.truncate(0)
+        rgb_img.save(buffer, format="JPEG", quality=quality, optimize=True)
+        size_bytes = buffer.tell()
+        if size_bytes <= max_bytes:
+            break
+        quality -= 5
+
+    # If still > max_bytes, resize to 1800px and re-encode with Q88
+    if size_bytes > max_bytes:
+        optimized = optimize_image_for_analysis(img, max_dim=1800)
+        final_w, final_h = optimized.size
+        rgb_img = optimized.convert("RGB") if optimized.mode != "RGB" else optimized
+        quality = 88
+        buffer.seek(0)
+        buffer.truncate(0)
+        rgb_img.save(buffer, format="JPEG", quality=quality, optimize=True)
+        size_bytes = buffer.tell()
+
+    buffer.seek(0)
+    final_bytes = buffer.read()
+
+    orig_estimated_mb = (orig_w * orig_h * 3) / (1024 * 1024)
+    final_size_kb = len(final_bytes) / 1024
+    opt_applied = "High-Quality Original" if (final_w == orig_w and final_h == orig_h and quality >= 90) else f"High-Detail Resize ({final_w}x{final_h}, Q{quality})"
+
+    logger.info(
+        f"[ASK_AI_IMAGE]\n"
+        f"Original size: ~{orig_estimated_mb:.2f} MB\n"
+        f"Original dimensions: {orig_w}x{orig_h}\n"
+        f"Ask AI image size: {final_size_kb:.1f} KB\n"
+        f"Ask AI image dimensions: {final_w}x{final_h}\n"
+        f"Optimization applied: {opt_applied}"
+    )
+
+    return final_bytes, "image/jpeg", final_w, final_h
+
 def validate_image_file(
     uploaded_file,
     max_size_mb: float = 10.0

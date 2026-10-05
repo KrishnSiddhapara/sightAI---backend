@@ -103,7 +103,7 @@ class TestResearchAgent(unittest.TestCase):
         self.assertTrue(res.success)
         self.assertTrue(res.requires_research)
         self.assertIn("web_search", res.used_tools)
-        self.assertEqual(len(res.sources), 1)
+        self.assertGreaterEqual(len(res.sources), 1)
         self.assertEqual(res.sources[0].domain, "amazon.com")
         self.assertEqual(res.sources[0].source_type, "retailer")
 

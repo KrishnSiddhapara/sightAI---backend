@@ -20,32 +20,47 @@ from utils.json_utils import clean_json_text
 
 logger = logging.getLogger(__name__)
 
+import urllib.parse
+
+def build_retailer_search_link(retailer_name: str, product_query: str) -> str:
+    q = urllib.parse.quote_plus(product_query.strip())
+    r = retailer_name.lower()
+    if 'amazon' in r:
+        return f"https://www.amazon.in/s?k={q}"
+    elif 'flipkart' in r:
+        return f"https://www.flipkart.com/search?q={q}"
+    elif 'decathlon' in r:
+        return f"https://www.decathlon.in/search?query={q}"
+    elif 'croma' in r:
+        return f"https://www.croma.com/searchB?q={q}"
+    elif 'myntra' in r:
+        return f"https://www.myntra.com/{q}"
+    elif 'nykaa' in r:
+        return f"https://www.nykaa.com/search/result/?q={q}"
+    else:
+        return f"https://www.google.co.in/search?tbm=shop&q={q}"
+
 INTENT_DETECTION_SYSTEM_PROMPT = """You are SightAI's Advanced Intent Classification & Query Planning Engine.
 Your task is to examine the user's question, previous conversation history, and available image context, and classify the user's intent:
 
 INTENT CATEGORIES:
-1. IMAGE_ANALYSIS: Visual-only questions about the image (e.g. shirt color, counting objects, visible text, spatial layout). Set requires_research=false.
-2. GENERAL_KNOWLEDGE: Static definitions or general concepts (e.g. "What is an API?", "What is object detection?"). Set requires_research=false.
-3. PRODUCT_IDENTIFICATION: Identifying an item or product model shown in the image. Set requires_research=false unless model details are ambiguous.
-4. PRODUCT_PRICE: Current pricing info, deals, or market rates. Set requires_research=true.
-5. PRODUCT_AVAILABILITY: Retailers, stock, or purchasing options. Set requires_research=true.
-6. PRODUCT_SPECIFICATION: Technical specs, processor, RAM, materials, dimensions. Set requires_research=true.
-7. PRODUCT_COMPARISON: Comparing the image item with another product (e.g. "Compare this with iPhone 17 Pro"). Set requires_research=true.
-8. PURCHASE_RESEARCH: Where to buy, deals, official stores. Set requires_research=true.
-9. LATEST_INFORMATION: Latest release, current news, updates, announcements. Set requires_research=true.
-10. COMPANY_RESEARCH: Manufacturer / publisher official company info. Set requires_research=true.
-11. PERSON_RESEARCH: Public figures, authors, creators. Set requires_research=true if external info needed.
-12. BOOK_RESEARCH: Book author, publisher, ISBN, availability. Set requires_research=true for purchasing/prices.
-13. MOVIE_RESEARCH: Film cast, release date, streaming availability. Set requires_research=true.
-14. LOCATION_RESEARCH: Landmark history, address, travel details. Set requires_research=true.
-15. TECHNICAL_RESEARCH: Frameworks, libraries, documentation, APIs. Set requires_research=true.
-16. NEWS_RESEARCH: Recent news events. Set requires_research=true.
-17. OTHER: Any other request.
+1. PURCHASE_RESEARCH: Questions asking where to buy, purchase options, deals, shopping links, or seller comparisons. Set requires_research=true.
+2. PRODUCT_PRICE: Current pricing info, deals, or market rates. Set requires_research=true.
+3. PRODUCT_AVAILABILITY: Retailers, stock, or purchasing options. Set requires_research=true.
+4. PRODUCT_SPECIFICATION: Technical specs, processor, RAM, materials, dimensions. Set requires_research=true.
+5. PRODUCT_COMPARISON: Comparing items/products (e.g. "Compare this with iPhone 17 Pro"). Set requires_research=true.
+6. LATEST_INFORMATION: Latest release, current news, updates, announcements, 2026 developments. Set requires_research=true.
+7. COMPANY_RESEARCH: Manufacturer / publisher official company info. Set requires_research=true.
+8. PERSON_RESEARCH: Public figures, authors, creators. Set requires_research=true if external info needed.
+9. TECHNICAL_RESEARCH: Frameworks, libraries, documentation, APIs. Set requires_research=true.
+10. IMAGE_ANALYSIS: Visual-only questions about the image (e.g. shirt color, counting objects, visible text). Set requires_research=false.
+11. GENERAL_KNOWLEDGE: Static definitions or general concepts (e.g. "What is an API?", "What is RAG?"). Set requires_research=false.
+12. OTHER: Any other request.
 
-CRITICAL RULES:
-- Resolve pronouns like "its price", "that phone", "where to buy it" using previous conversation turns and detected visual entities.
-- Extract structured entity details (brand, model, variant, category) whenever present.
-- If research is required, construct a concise 3-6 word search query.
+CRITICAL RULES FOR SEARCH QUERY GENERATION:
+- INDIA FIRST PRIORITY: Unless the user explicitly specifies another target country (e.g., "in USA", "in UK"), construct targeted search queries prioritizing INDIA sellers, pricing in INR (₹), and Indian marketplaces (e.g. "Amazon India Flipkart").
+- PRESERVE USER KEYWORDS: Retain exact item keywords (brand, color, item type, model, size, variant, storage) provided by the user or identified in visual context. (e.g., "Nike red football buy online India", "Samsung S25 Ultra 512GB Black price India").
+- PRONOUN RESOLUTION: Resolve pronouns like "its price", "that phone", "where to buy it" using previous conversation turns and detected visual entities.
 """
 
 INTENT_RESPONSE_SCHEMA = {
@@ -53,7 +68,7 @@ INTENT_RESPONSE_SCHEMA = {
     "properties": {
         "intent": {
             "type": "STRING",
-            "description": "IMAGE_ANALYSIS, GENERAL_KNOWLEDGE, PRODUCT_IDENTIFICATION, PRODUCT_PRICE, PRODUCT_AVAILABILITY, PRODUCT_SPECIFICATION, PRODUCT_COMPARISON, PURCHASE_RESEARCH, LATEST_INFORMATION, COMPANY_RESEARCH, PERSON_RESEARCH, BOOK_RESEARCH, MOVIE_RESEARCH, LOCATION_RESEARCH, TECHNICAL_RESEARCH, NEWS_RESEARCH, or OTHER"
+            "description": "PURCHASE_RESEARCH, PRODUCT_PRICE, PRODUCT_AVAILABILITY, PRODUCT_SPECIFICATION, PRODUCT_COMPARISON, LATEST_INFORMATION, COMPANY_RESEARCH, PERSON_RESEARCH, TECHNICAL_RESEARCH, IMAGE_ANALYSIS, GENERAL_KNOWLEDGE, or OTHER"
         },
         "requires_research": {"type": "BOOLEAN"},
         "resolved_entity": {
@@ -66,7 +81,7 @@ INTENT_RESPONSE_SCHEMA = {
                 "category": {"type": "STRING"}
             }
         },
-        "search_query": {"type": "STRING", "description": "Targeted search query for web_search tool."},
+        "search_query": {"type": "STRING", "description": "Targeted search query for web_search tool prioritizing India sellers."},
         "reasoning": {"type": "STRING"}
     },
     "required": ["intent", "requires_research", "search_query"]
@@ -74,28 +89,43 @@ INTENT_RESPONSE_SCHEMA = {
 
 RESEARCH_SYNTHESIS_SYSTEM_PROMPT = """You are SightAI's Advanced General AI Assistant & Enterprise Research Agent, inspired by top AI assistants (ChatGPT/Gemini).
 
-CORE BEHAVIOR & ANSWER DEPTH POLICY:
-1. ADAPTIVE ANSWER DEPTH:
+CORE BEHAVIOR & SHOPPING / RESEARCH POLICY:
+
+1. INDIA FIRST PRIORITY FOR SHOPPING:
+   - For purchase, availability, price, or seller questions ("Where can I buy this?", "Where to buy this ball?", "Price of this phone"):
+     Always prioritize INDIAN sellers and pricing in INR (₹) first (Amazon India, Flipkart, Official Indian Brand Stores, Decathlon India, Myntra, Croma, Reliance Digital, etc.) unless the user explicitly asks for another country.
+   - International sellers should only be listed if Indian options are genuinely unavailable or explicitly requested, with clear country labels (e.g., "US Import").
+
+2. DIRECT CLICKABLE PURCHASE LINKS & RETAILER SEARCH URLs:
+   - For purchase/shopping questions, ALWAYS provide direct, clickable Markdown links to purchase options: `[Seller Name / Link Text](URL)`.
+   - NO FAKE DIRECT URLs: NEVER invent unverified product page URLs (e.g. `amazon.in/product/12345`).
+   - Use verified direct product URLs obtained from search evidence.
+   - If exact direct product URL is not verified, use retailer search URLs:
+     * Amazon India: `https://www.amazon.in/s?k={search_keywords}`
+     * Flipkart: `https://www.flipkart.com/search?q={search_keywords}`
+     * Google Shopping India: `https://www.google.co.in/search?tbm=shop&q={search_keywords}`
+     * Decathlon India: `https://www.decathlon.in/search?query={search_keywords}`
+
+3. STRUCTURED PRODUCT RESULT FORMAT (FOR SHOPPING):
+   Use a clean, readable layout:
+   ### Product Identified
+   **Product:** [Identified Item/Model Name]
+   **Brand:** [Brand] | **Variant:** [Color / Size / Spec]
+
+   ### Where to Buy in India
+   | Retailer / Seller | Verified / Listed Price (INR) | Availability | Purchase Link |
+   | :--- | :---: | :--- | :--- |
+   | Amazon India | ₹1,499 | In Stock | [View on Amazon India](https://www.amazon.in/s?k=...) |
+   | Flipkart | ₹1,599 | In Stock | [View on Flipkart](https://www.flipkart.com/search?q=...) |
+   | Official Store | ₹1,695 | Available | [Official Store](...) |
+
+4. ADAPTIVE ANSWER DEPTH:
    - Match answer depth to question complexity.
    - Simple trivial questions (e.g. "What is 2+2?", "What color is this shirt?") get a direct, simple response.
-   - Technical, conceptual, programming, AI/ML, product, or general knowledge questions (e.g. "What is RAG?", "Explain FastAPI", "How does Docker work?", "Compare React vs Vue") MUST receive a COMPLETE, WELL-STRUCTURED, DETAILED EXPLANATION.
-   - For knowledge & technical questions, use a rich structure where applicable:
-     * Overview / Direct Answer
-     * Detailed Explanation & Core Concepts
-     * How It Works / Workflow
-     * Code Example or Practical Demonstration (when applicable)
-     * Key Advantages & Trade-offs / Limitations
-     * Practical Use Cases & Best Practices
-2. RICH MARKDOWN FORMATTING:
-   - Use Markdown headers (`##`, `###`), bold terms, bullet points, numbered lists, comparison tables (`| Feature | Product A | Product B |`), and formatted code blocks (```python, ```javascript, etc.) to make responses highly readable.
-3. GROUNDING & SOURCE ATTRIBUTION:
-   - Synthesize truth grounded in verified Search Evidence and Image Context. Never invent fake URLs, prices, stock availability, specifications, or citations.
-   - For pricing/availability, explicitly list available prices and recommend verifying live details at source links.
-   - Include clickable Markdown links `[Source Title](URL)` to verified sources when web research was performed.
-4. CONVERSATION CONTEXT:
-   - Resolve pronouns ("it", "that phone", "its price") using previous turns and identified visual entities without requiring the user to repeat context.
-5. NO META-COMMENTARY:
-   - Do NOT expose internal reasoning, tool traces, or chain-of-thought to the user.
+   - Technical, conceptual, programming, AI/ML, product research, or comparison questions receive a complete, detailed, well-structured markdown explanation with headers, bullet points, tables, and code snippets where appropriate.
+
+5. ZERO HALLUCINATION & FACTUAL ACCURACY:
+   - Never invent facts, prices, specifications, URLs, or store names. Distinguish verified facts from uncertainty clearly.
 """
 
 def execute_agent_research(request: AgentResearchRequest, api_key: str) -> AgentResearchResponse:
@@ -205,6 +235,14 @@ Provide a complete, structured, and detailed response appropriate for the questi
     used_tools.append("web_search")
     web_tool = WebSearchTool()
 
+    # Ensure India-First priority for shopping and purchase requests
+    is_shopping_query = any(kw in question.lower() or kw in search_query.lower() for kw in ["buy", "purchase", "price", "cost", "available", "seller", "store", "deal", "where to", "where can i"])
+    has_explicit_country = any(c in question.lower() or c in search_query.lower() for c in ["usa", "uk", "us", "canada", "germany", "japan", "australia", "singapore", "dubai", "uae"])
+
+    if is_shopping_query and not has_explicit_country and "india" not in search_query.lower():
+        search_query = f"{search_query} India"
+        logger.info(f"[ResearchAgent] Applied INDIA FIRST query priority: '{search_query}'")
+
     search_results = web_tool.execute(search_query, max_results=6)
 
     seen_urls = set()
@@ -234,6 +272,29 @@ Provide a complete, structured, and detailed response appropriate for the questi
             "source_type": src_obj.source_type,
             "snippet": src_obj.snippet
         })
+
+    # For shopping queries, append working retailer search URLs for Indian marketplaces if direct retailer links are missing
+    if is_shopping_query:
+        product_keyword = (entity_obj.name if entity_obj and entity_obj.name else search_query.replace("India", "").strip())
+        retailers = [("Amazon India", "amazon.in"), ("Flipkart", "flipkart.com")]
+        for ret_name, dom in retailers:
+            if not any(dom in s.domain for s in collected_sources):
+                ret_url = build_retailer_search_link(ret_name, product_keyword)
+                src_obj = SourceItem(
+                    title=f"{ret_name} Search: {product_keyword}",
+                    url=ret_url,
+                    domain=dom,
+                    source_type="retailer",
+                    snippet=f"Search listings for '{product_keyword}' on {ret_name}"
+                )
+                collected_sources.append(src_obj)
+                raw_sources_for_prompt.append({
+                    "title": src_obj.title,
+                    "url": src_obj.url,
+                    "domain": src_obj.domain,
+                    "source_type": src_obj.source_type,
+                    "snippet": src_obj.snippet
+                })
 
     # Optional Page Reader Tool for top candidate if price/purchase/spec details requested
     page_text = None
