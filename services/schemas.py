@@ -65,6 +65,19 @@ class GroundedAnalysisResult(BaseModel):
     scene: SceneDescription = Field(default_factory=SceneDescription, description="Scene-level understanding grounded strictly in visible evidence.")
     overall_summary: str = Field(default="Executive summary of the image.", description="Executive summary built strictly from the verified structured objects and scene analysis.")
 
+class VersionRecord(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    version_id: str = Field(description="Unique version identifier e.g. 'v0', 'v1'")
+    version_number: int = Field(description="Numeric version sequence index")
+    created_at: str = Field(description="ISO 8601 server timestamp")
+    updated_at: str = Field(description="ISO 8601 server timestamp")
+    formatted_time: str = Field(description="Human-readable formatted timestamp")
+    edit_prompt: str = Field(description="Edit prompt or creation description")
+    source_version_number: int = Field(default=0, description="Parent version number this edit was based on")
+    parent_version_id: Optional[str] = Field(default="v0", description="Parent version identifier")
+    image_base64: Optional[str] = Field(default=None, description="Base64 encoded image string")
+
 class SourceItem(BaseModel):
     title: str = Field(description="Title of the web source or page.")
     url: str = Field(description="Validated external URL.")
@@ -87,6 +100,7 @@ class ProductEntity(BaseModel):
 
 class AgentResearchRequest(BaseModel):
     question: str = Field(description="User natural language question.")
+    image_base64: Optional[str] = Field(default=None, description="Base64 encoded image data for visual Q&A.")
     image_context: Optional[dict] = Field(default=None, description="Existing visual analysis context (objects, scene, summary).")
     conversation_history: Optional[List[dict]] = Field(default=[], description="Previous conversation turn history.")
     user_region: Optional[str] = Field(default=None, description="Optional country/region preference.")
@@ -99,7 +113,7 @@ class AgentResearchResponse(BaseModel):
     entity: Optional[ProductEntity] = Field(default=None, description="Extracted product/entity details.")
     facts: List[FactItem] = Field(default=[], description="Structured key facts extracted from research.")
     used_tools: List[str] = Field(default=[], description="List of executed tool names.")
-    sources: List[SourceItem] = Field(default=[], description="Verified external sources and links.")
+    sources: List[SourceItem] = Field(default=[], description="External sources and reference links.")
     confidence: str = Field(default="high", description="Confidence level: high, medium, low.")
     research_summary: Optional[str] = Field(default=None, description="User-facing concise research summary.")
     error: Optional[str] = Field(default=None, description="Error message if research failed.")

@@ -314,7 +314,8 @@ async def edit_image_endpoint(
     file: Optional[UploadFile] = File(None),
     image_base64: Optional[str] = Form(None),
     instruction: str = Form(...),
-    vision_context_json: Optional[str] = Form(None)
+    vision_context_json: Optional[str] = Form(None),
+    source_version_number: Optional[int] = Form(0)
 ):
     api_key = get_api_key()
     
@@ -361,6 +362,7 @@ async def edit_image_endpoint(
         )
 
     try:
+        import datetime
         edited_pil = edit_image(
             image=pil_img,
             instruction=instruction,
@@ -383,11 +385,19 @@ async def edit_image_endpoint(
             )
 
         edited_b64 = pil_to_base64(edited_pil, "JPEG")
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        iso_timestamp = now_dt.isoformat()
+        formatted_time = now_dt.strftime("%d %b %Y • %I:%M %p")
+
         return {
             "success": True,
             "is_safe": True,
             "image_base64": edited_b64,
             "prompt": instruction.strip(),
+            "created_at": iso_timestamp,
+            "updated_at": iso_timestamp,
+            "formatted_time": formatted_time,
+            "source_version_number": source_version_number or 0,
             "safety": edit_safety_result,
             "ambiguity_warning": None
         }
@@ -399,42 +409,83 @@ async def edit_image_endpoint(
 
 @app.post("/api/ask")
 async def ask_question_endpoint(
+    request: Request,
     file: Optional[UploadFile] = File(None),
     image_base64: Optional[str] = Form(None),
-    question: str = Form(...)
+    question: Optional[str] = Form(None),
+    image_context_json: Optional[str] = Form(None),
+    conversation_history_json: Optional[str] = Form(None)
 ):
     api_key = get_api_key()
 
+    # Handle JSON body request if content-type is application/json
+    q_str = question
+    img_b64 = image_base64
+    img_ctx = None
+    conv_hist = []
+
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+            q_str = body.get("question")
+            img_b64 = body.get("image_base64")
+            img_ctx = body.get("image_context")
+            conv_hist = body.get("conversation_history") or []
+        except Exception as json_err:
+            logger.warning(f"Could not parse JSON body in /api/ask: {json_err}")
+
+    if not q_str or not q_str.strip():
+        raise HTTPException(status_code=400, detail="Question prompt is required.")
+
+    if image_context_json and not img_ctx:
+        try:
+            img_ctx = json.loads(image_context_json)
+        except Exception:
+            pass
+
+    if conversation_history_json and not conv_hist:
+        try:
+            conv_hist = json.loads(conversation_history_json)
+        except Exception:
+            pass
+
+    pil_img = None
     if file is not None:
         content_bytes = await file.read()
-        pil_img = parse_and_validate_file(file.filename or "input.jpg", content_bytes)
-    elif image_base64 is not None:
+        if content_bytes:
+            pil_img = parse_and_validate_file(file.filename or "input.jpg", content_bytes)
+    elif img_b64 is not None and img_b64.strip():
         try:
-            pil_img = base64_to_pil(image_base64)
+            pil_img = base64_to_pil(img_b64)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
-    else:
-        raise HTTPException(status_code=400, detail="Either file upload or image_base64 must be provided.")
+            logger.warning(f"Could not decode base64 image in /api/ask: {e}")
 
     try:
-        opt_img = optimize_image_for_analysis(pil_img, MAX_ANALYSIS_DIMENSION)
-        answer_text = answer_image_query(opt_img, question, api_key)
-        return {
-            "success": True,
-            "question": question.strip(),
-            "answer": answer_text
-        }
+        agent_req = AgentResearchRequest(
+            question=q_str.strip(),
+            image_base64=img_b64,
+            image_context=img_ctx,
+            conversation_history=conv_hist
+        )
+        res = execute_agent_research(agent_req, api_key=api_key, pil_image=pil_img)
+        return res.model_dump()
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logger.error(f"Error answering question: {e}")
+        logger.error(f"Error answering question: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Question processing failed: {str(e)}")
 
 @app.post("/api/agent/research", response_model=AgentResearchResponse)
 async def research_agent_endpoint(request: AgentResearchRequest):
     api_key = get_api_key()
     try:
-        res = execute_agent_research(request, api_key)
+        pil_img = None
+        if request.image_base64:
+            try:
+                pil_img = base64_to_pil(request.image_base64)
+            except Exception:
+                pass
+        res = execute_agent_research(request, api_key=api_key, pil_image=pil_img)
         return res
     except Exception as e:
         logger.error(f"Error during research agent execution: {e}")

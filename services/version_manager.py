@@ -11,6 +11,7 @@ def create_initial_version(original_image: Image.Image) -> Dict[str, Any]:
     """
     Creates Version 0 (Original Image) version record.
     Ensures image object is copied/isolated to prevent unintended mutations.
+    Generates backend ISO 8601 timezone-aware server timestamp.
     """
     if not isinstance(original_image, Image.Image):
         raise ValueError("Invalid original image input.")
@@ -20,7 +21,9 @@ def create_initial_version(original_image: Image.Image) -> Dict[str, Any]:
     if img_copy.mode != "RGB":
         img_copy = img_copy.convert("RGB")
 
-    now_str = datetime.datetime.now().strftime("%I:%M:%S %p")
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    iso_timestamp = now_dt.isoformat()
+    formatted_time = now_dt.strftime("%d %b %Y • %I:%M %p")
 
     return {
         "version_id": "v0",
@@ -28,7 +31,10 @@ def create_initial_version(original_image: Image.Image) -> Dict[str, Any]:
         "image": img_copy,
         "edit_prompt": "Original Image",
         "source_version_number": 0,
-        "created_at": now_str,
+        "parent_version_id": "v0",
+        "created_at": iso_timestamp,
+        "updated_at": iso_timestamp,
+        "formatted_time": formatted_time
     }
 
 def add_new_version(
@@ -38,7 +44,7 @@ def add_new_version(
     source_version_num: int,
 ) -> Dict[str, Any]:
     """
-    Appends a new immutable version record to version history.
+    Appends a new immutable version record to version history with backend server timestamp.
     
     Args:
         history: Current list of version records.
@@ -64,7 +70,9 @@ def add_new_version(
     if img_copy.mode != "RGB":
         img_copy = img_copy.convert("RGB")
 
-    now_str = datetime.datetime.now().strftime("%I:%M:%S %p")
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    iso_timestamp = now_dt.isoformat()
+    formatted_time = now_dt.strftime("%d %b %Y • %I:%M %p")
 
     new_record = {
         "version_id": f"v{next_num}",
@@ -72,11 +80,14 @@ def add_new_version(
         "image": img_copy,
         "edit_prompt": prompt.strip(),
         "source_version_number": source_version_num,
-        "created_at": now_str,
+        "parent_version_id": f"v{source_version_num}",
+        "created_at": iso_timestamp,
+        "updated_at": iso_timestamp,
+        "formatted_time": formatted_time
     }
 
     history.append(new_record)
-    logger.info(f"Created version v{next_num} based on v{source_version_num} with prompt: '{prompt.strip()}'")
+    logger.info(f"Created version v{next_num} based on v{source_version_num} at {iso_timestamp} with prompt: '{prompt.strip()}'")
     return new_record
 
 def get_version_by_number(
