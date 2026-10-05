@@ -385,7 +385,7 @@ async def edit_image_endpoint(
             )
 
         edited_b64 = pil_to_base64(edited_pil, "JPEG")
-        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_dt = datetime.datetime.now().astimezone()
         iso_timestamp = now_dt.isoformat()
         formatted_time = now_dt.strftime("%d %b %Y • %I:%M %p")
 

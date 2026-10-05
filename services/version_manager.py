@@ -21,7 +21,7 @@ def create_initial_version(original_image: Image.Image) -> Dict[str, Any]:
     if img_copy.mode != "RGB":
         img_copy = img_copy.convert("RGB")
 
-    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    now_dt = datetime.datetime.now().astimezone()
     iso_timestamp = now_dt.isoformat()
     formatted_time = now_dt.strftime("%d %b %Y • %I:%M %p")
 
@@ -70,7 +70,7 @@ def add_new_version(
     if img_copy.mode != "RGB":
         img_copy = img_copy.convert("RGB")
 
-    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    now_dt = datetime.datetime.now().astimezone()
     iso_timestamp = now_dt.isoformat()
     formatted_time = now_dt.strftime("%d %b %Y • %I:%M %p")
 
