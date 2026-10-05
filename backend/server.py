@@ -7,7 +7,7 @@ import time
 from typing import Optional, Dict, Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Response, status
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Response, Request, status
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 # pyrefly: ignore [missing-import]
@@ -47,6 +47,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.warning(f"[HTTP_EXC] Path: '{request.url.path}' | Status: {exc.status_code} | Detail: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "error_code": "HTTP_ERROR",
+            "error": str(exc.detail),
+            "detail": str(exc.detail),
+            "safety": None
+        }
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    err_str = str(exc)
+    logger.error(f"[UNHANDLED_EXCEPTION] Path: '{request.url.path}' | Error: {type(exc).__name__}: {err_str}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "success": False,
+            "error_code": "INTERNAL_ERROR",
+            "error": f"Image analysis encountered an issue ({err_str}). Please retry.",
+            "safety": None
+        }
+    )
 
 class DummyUploadedFile:
     """Wrapper to make raw bytes compatible with validate_image_file utility."""
@@ -98,6 +126,19 @@ def base64_to_pil(b64_str: str) -> Image.Image:
         img = img.convert("RGB")
     return img
 
+@app.get("/")
+def root_endpoint():
+    key = os.getenv("VLM_API_KEY", "").strip()
+    is_key_configured = bool(key and key != "your_api_key_here")
+    return {
+        "status": "online",
+        "service": "SightAI Grounded Vision & Multi-Version AI API",
+        "version": "1.0.0",
+        "api_key_configured": is_key_configured,
+        "docs_url": "/docs",
+        "health_url": "/api/health"
+    }
+
 @app.get("/api/health")
 def health_check():
     key = os.getenv("VLM_API_KEY", "").strip()
@@ -124,9 +165,10 @@ async def safety_check_endpoint(file: UploadFile = File(...)):
     }
 
 @app.post("/api/analyze")
-async def analyze_endpoint(file: UploadFile = File(...)):
+async def analyze_endpoint(request: Request, file: UploadFile = File(...)):
     import uuid
-    req_id = f"req_{uuid.uuid4().hex[:8]}"
+    client_req_id = request.headers.get("X-Request-ID")
+    req_id = client_req_id if client_req_id else f"req_{uuid.uuid4().hex[:8]}"
     t_start = time.perf_counter()
     safety_result = None
 
@@ -407,4 +449,6 @@ async def export_image_endpoint(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend.server:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "8000"))
+    logger.info(f"Starting SightAI backend server on 0.0.0.0:{port}")
+    uvicorn.run("backend.server:app", host="0.0.0.0", port=port, reload=False)

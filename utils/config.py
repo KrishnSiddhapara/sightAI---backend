@@ -14,8 +14,8 @@ ANALYSIS_IMAGE_QUALITY: int = int(os.getenv("ANALYSIS_IMAGE_QUALITY", "85"))
 # Maximum output tokens for structured Gemini vision responses
 MAX_OUTPUT_TOKENS: int = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
 
-# Request timeout limit in seconds
-ANALYSIS_TIMEOUT: float = float(os.getenv("ANALYSIS_TIMEOUT", "120.0"))
+# Request timeout limit in seconds (kept under Render's 100s proxy timeout to prevent 502 errors)
+ANALYSIS_TIMEOUT: float = float(os.getenv("ANALYSIS_TIMEOUT", "45.0"))
 
 # Primary VLM model (strictly gemini-2.5-flash)
 PRIMARY_VLM_MODEL: str = os.getenv("VLM_MODEL", "gemini-2.5-flash").strip()
