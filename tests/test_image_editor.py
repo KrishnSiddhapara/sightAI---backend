@@ -43,7 +43,7 @@ class TestImageEditorService(unittest.TestCase):
         inst1 = ObjectInstance(id="person_1", attributes=InstanceAttributes(clothing_color="red"))
         inst2 = ObjectInstance(id="person_2", attributes=InstanceAttributes(clothing_color="green"))
         cat = DetectedObjectCategory(name="person", confirmed_count=2, instances=[inst1, inst2])
-        scene = SceneDescription(category="Outdoor", environment="Park", primary_activity="Walking", summary="Two people.")
+        scene = SceneDescription(environment="Park", primary_activity="Walking", summary="Two people.")
         vision_ctx = GroundedAnalysisResult(objects=[cat], scene=scene, overall_summary="Two people in park.")
 
         # Ambiguous instruction

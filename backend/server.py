@@ -233,7 +233,7 @@ async def analyze_endpoint(request: Request, file: UploadFile = File(...)):
             f"VISION: {t_vlm:.3f}s | "
             f"TOTAL: {t_total:.3f}s"
         )
-        logger.info(f"[{req_id}] [FINAL_RESPONSE] Result ready (Objects={len(grounded_result.objects)}, Scene='{grounded_result.scene.category}')")
+        logger.info(f"[{req_id}] [FINAL_RESPONSE] Result ready (Objects={len(grounded_result.objects)}, Summary='{grounded_result.scene.summary}')")
 
         return {
             "success": True,

@@ -124,7 +124,7 @@ def check_image_safety(image: Union[Image.Image, types.Part], api_key: str) -> D
         response_schema=SafetyEvaluation,
         safety_settings=native_safety_settings,
         temperature=0.0,
-        max_output_tokens=512,
+        max_output_tokens=1024,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
@@ -145,7 +145,21 @@ def check_image_safety(image: Union[Image.Image, types.Part], api_key: str) -> D
                 continue
 
             raw_text = clean_json_text(response.text)
-            data = json.loads(raw_text)
+            data = None
+            try:
+                data = json.loads(raw_text)
+            except Exception as json_err:
+                first_b = raw_text.find('{')
+                last_b = raw_text.rfind('}')
+                if first_b != -1 and last_b != -1 and first_b < last_b:
+                    try:
+                        data = json.loads(raw_text[first_b:last_b+1])
+                    except Exception:
+                        data = None
+
+            if not isinstance(data, dict):
+                last_error_detail = f"Malformed safety JSON output: {raw_text[:200]}"
+                continue
 
             is_safe = bool(data.get("is_safe", False))
             category = str(data.get("category", SafetyCategory.UNKNOWN.value)).upper()

@@ -135,7 +135,7 @@ class TestE2EMultiVersionEditor(unittest.TestCase):
         )
         ctx = GroundedAnalysisResult(
             objects=[cat],
-            scene=SceneDescription(category="Outdoor", environment="Park", primary_activity="Walk", summary="3 people"),
+            scene=SceneDescription(environment="Park", primary_activity="Walk", summary="3 people"),
             overall_summary="3 people in park"
         )
 

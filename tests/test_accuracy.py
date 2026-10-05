@@ -207,7 +207,7 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
         )
 
         cat = DetectedObjectCategory(name="box", confirmed_count=3, instances=[inst_valid, inst_inverted, inst_zero_area])
-        scene = SceneDescription(category="Indoor", environment="Room", primary_activity="Testing", summary="Test")
+        scene = SceneDescription(environment="Room", primary_activity="Testing", summary="Test")
         res = GroundedAnalysisResult(objects=[cat], scene=scene, overall_summary="Test")
 
         sanitized = sanitize_bounding_boxes(res)
