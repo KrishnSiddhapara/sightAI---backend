@@ -318,31 +318,47 @@ async def edit_image_endpoint(
 ):
     api_key = get_api_key()
     
-    if file is not None:
+    pil_img = None
+    if file is not None and getattr(file, "filename", None):
         content_bytes = await file.read()
-        pil_img = parse_and_validate_file(file.filename or "input.jpg", content_bytes, max_size_mb=AI_EDITOR_MAX_IMAGE_SIZE_MB)
-    elif image_base64 is not None:
+        if len(content_bytes) > 0:
+            pil_img = parse_and_validate_file(file.filename or "input.jpg", content_bytes, max_size_mb=AI_EDITOR_MAX_IMAGE_SIZE_MB)
+
+    if pil_img is None and image_base64 is not None and image_base64.strip():
         try:
-            pil_img = base64_to_pil(image_base64)
+            pil_img = base64_to_pil(image_base64.strip())
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
-    else:
-        raise HTTPException(status_code=400, detail="Either file upload or image_base64 must be provided.")
+
+    if pil_img is None:
+        raise HTTPException(status_code=400, detail="Either a valid image file upload or image_base64 string must be provided.")
 
     val_err = validate_edit_instruction(instruction)
     if val_err:
         raise HTTPException(status_code=400, detail=val_err)
 
     vision_ctx = None
-    if vision_context_json:
+    if vision_context_json and vision_context_json.strip():
         try:
             parsed_ctx = json.loads(vision_context_json)
-            vision_ctx = GroundedAnalysisResult.model_validate(parsed_ctx)
+            if isinstance(parsed_ctx, str):
+                parsed_ctx = json.loads(parsed_ctx)
+            if isinstance(parsed_ctx, dict):
+                vision_ctx = GroundedAnalysisResult.model_validate(parsed_ctx)
         except Exception as e:
             logger.warning(f"Could not parse vision context JSON: {e}")
 
     # Check target ambiguity helper
     is_ambig, ambig_msg = check_edit_instruction_ambiguity(instruction, vision_ctx)
+    if is_ambig and ambig_msg:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "success": False,
+                "error": ambig_msg,
+                "ambiguity_warning": ambig_msg
+            }
+        )
 
     try:
         edited_pil = edit_image(
@@ -362,7 +378,7 @@ async def edit_image_endpoint(
                     "is_safe": False,
                     "error": edit_safety_result.get("error") or "Generated edit contained unsafe content and was discarded.",
                     "safety": edit_safety_result,
-                    "ambiguity_warning": ambig_msg if is_ambig else None
+                    "ambiguity_warning": None
                 }
             )
 
@@ -373,7 +389,7 @@ async def edit_image_endpoint(
             "image_base64": edited_b64,
             "prompt": instruction.strip(),
             "safety": edit_safety_result,
-            "ambiguity_warning": ambig_msg if is_ambig else None
+            "ambiguity_warning": None
         }
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
