@@ -22,7 +22,6 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
                 }
             ],
             "scene": {
-                "category": "Office",
                 "environment": "Desk area",
                 "primary_activity": "Working",
                 "summary": "Office room"
@@ -33,24 +32,24 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
         res = GroundedAnalysisResult.model_validate(norm)
         self.assertEqual(len(res.objects), 1)
         self.assertEqual(res.objects[0].name, "person")
-        self.assertEqual(res.scene.category, "Office")
+        self.assertEqual(res.scene.environment, "Desk area")
 
     def test_missing_optional_fields_and_defaults(self):
         payload = {
             "objects": [{"name": "chair"}],
-            "scene": {"category": "Room"},
+            "scene": {"environment": "Room"},
             "overall_summary": "A room with a chair."
         }
         norm = normalize_grounded_analysis(payload)
         res = GroundedAnalysisResult.model_validate(norm)
         self.assertEqual(res.objects[0].confirmed_count, 1)
         self.assertEqual(res.objects[0].uncertain_count, 0)
-        self.assertEqual(res.scene.environment, "Environment observed")
+        self.assertEqual(res.scene.environment, "Room")
 
     def test_empty_objects_image(self):
         payload = {
             "objects": [],
-            "scene": {"category": "Landscape", "environment": "Forest", "primary_activity": "None", "summary": "Forest"},
+            "scene": {"environment": "Forest", "primary_activity": "None", "summary": "Forest"},
             "overall_summary": "Empty forest."
         }
         norm = normalize_grounded_analysis(payload)
@@ -73,7 +72,7 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
                     ]
                 }
             ],
-            "scene": {"sceneCategory": "Park", "sceneEnvironment": "Grass field", "primaryActivity": "Dogs playing", "sceneSummary": "Park"},
+            "scene": {"sceneEnvironment": "Grass field", "primaryActivity": "Dogs playing", "sceneSummary": "Park"},
             "overallSummary": "Dogs playing in park."
         }
         norm = normalize_grounded_analysis(payload)
@@ -95,7 +94,7 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
                     ]
                 }
             ],
-            "scene": {"category": "Road"},
+            "scene": {"environment": "Road"},
             "overall_summary": "Car on road."
         }
         norm = normalize_grounded_analysis(payload)
@@ -118,7 +117,7 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
                     ]
                 }
             ],
-            "scene": {"category": "Table"},
+            "scene": {"environment": "Table"},
             "overall_summary": "Bottle on table."
         }
         norm = normalize_grounded_analysis(payload)

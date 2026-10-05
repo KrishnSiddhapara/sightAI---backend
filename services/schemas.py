@@ -54,7 +54,6 @@ class DetectedObjectCategory(BaseModel):
 class SceneDescription(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    category: str = Field(default="General Scene", description="Primary scene category as a short 1-3 word label (e.g. 'Office', 'Classroom', 'Street', 'Living Room', 'Kitchen', 'Outdoor Park', 'Restaurant', 'Sports Field', 'Beach', 'Warehouse', 'Document'). Must be a concise title, never a sentence.")
     environment: str = Field(default="Environment observed", description="Specific environment description (e.g., 'Indoor office space with wooden desks'). Do not invent specific named venues unless visually proven.")
     primary_activity: str = Field(default="Primary activity observed", description="Primary activity occurring in the scene.")
     summary: str = Field(default="Visual summary of the scene", description="Concise visual summary of the scene.")

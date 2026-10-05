@@ -93,7 +93,6 @@ Return ONLY ONE valid raw JSON object matching this exact schema:
     }
   ],
   "scene": {
-    "category": "Street",
     "environment": "Paved street with sidewalk",
     "primary_activity": "People walking outdoors",
     "summary": "Outdoor daytime street scene."
@@ -107,19 +106,6 @@ CRITICAL RULES:
 - Use exact field names defined by the schema. Do NOT rename fields.
 - Return a complete and valid JSON object.
 """
-
-def sanitize_scene_category(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
-    """
-    Ensures scene.category is a clean, concise 1-3 word title.
-    Normalizes long sentence outputs or punctuation artifacts.
-    """
-    if result.scene and result.scene.category:
-        raw_cat = result.scene.category.strip().strip('*"`\'')
-        if '.' in raw_cat or ',' in raw_cat or len(raw_cat.split()) > 3:
-            cleaned_words = [w.strip('.,;:') for w in raw_cat.split() if w.strip('.,;:')]
-            raw_cat = " ".join(cleaned_words[:3])
-        result.scene.category = raw_cat.title() if raw_cat else "General Scene"
-    return result
 
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
@@ -295,9 +281,8 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
                     )
                     raise ValueError(f"SCHEMA_VALIDATION_ERROR: Model '{model_name}' response did not match expected GroundedAnalysisResult schema.")
 
-                sanitized = sanitize_bounding_boxes(raw_result)
-                final_res = sanitize_scene_category(sanitized)
-                logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}, scene={final_res.scene.category}).")
+                final_res = sanitize_bounding_boxes(raw_result)
+                logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}).")
                 return final_res
 
             except (socket.gaierror, ConnectionError) as net_err:

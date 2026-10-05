@@ -135,18 +135,15 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
     raw_scene = raw_data.get('scene')
     if isinstance(raw_scene, str):
         normalized['scene'] = {
-            'category': 'General Scene',
             'environment': raw_scene,
             'primary_activity': 'Observed Scene',
             'summary': raw_scene
         }
     elif isinstance(raw_scene, dict):
-        cat = (raw_scene.get('category') or raw_scene.get('scene_category') or raw_scene.get('sceneCategory') or 'General Scene')
         env = (raw_scene.get('environment') or raw_scene.get('sceneEnvironment') or raw_scene.get('environment_description') or 'Environment observed')
         act = (raw_scene.get('primary_activity') or raw_scene.get('primaryActivity') or raw_scene.get('activity') or 'Primary activity')
         summ = (raw_scene.get('summary') or raw_scene.get('sceneSummary') or raw_scene.get('description') or 'Scene summary')
         normalized['scene'] = {
-            'category': str(cat),
             'environment': str(env),
             'primary_activity': str(act),
             'summary': str(summ)
@@ -154,14 +151,12 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
     elif isinstance(raw_scene, list) and raw_scene:
         first_item = str(raw_scene[0])
         normalized['scene'] = {
-            'category': 'General Scene',
             'environment': first_item,
             'primary_activity': 'Primary activity',
             'summary': first_item
         }
     else:
         normalized['scene'] = {
-            'category': 'General Scene',
             'environment': 'Environment observed',
             'primary_activity': 'Primary activity',
             'summary': 'Scene summary'

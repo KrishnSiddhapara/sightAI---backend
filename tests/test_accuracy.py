@@ -63,7 +63,6 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
         )
 
         scene = SceneDescription(
-            category="Outdoor",
             environment="Park bench",
             primary_activity="Two people relaxing",
             summary="Park scene with two people.",
