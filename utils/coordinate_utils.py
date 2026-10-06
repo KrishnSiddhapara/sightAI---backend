@@ -184,7 +184,36 @@ def calculate_iou(box1: Dict[str, float], box2: Dict[str, float]) -> float:
         return 0.0
 
     return intersection_area / union_area
+def box_2d_to_dict(raw_box: Any) -> Optional[Dict[str, float]]:
+    """
+    Converts Gemini native box_2d format:
+    [ymin, xmin, ymax, xmax]
+    normalized to 0-1000
+    into our canonical:
+    {xmin, ymin, xmax, ymax}
+    """
 
+    if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+        return None
+
+    try:
+        ymin, xmin, ymax, xmax = [float(v) for v in raw_box]
+    except (ValueError, TypeError):
+        return None
+
+    if any(
+        v != v or abs(v) == float("inf")
+        for v in (ymin, xmin, ymax, xmax)
+    ):
+        return None
+
+    return sanitize_box(
+        xmin,
+        ymin,
+        xmax,
+        ymax,
+        min_size_px_in_1000=5.0
+    )
 def calculate_containment(box1: Dict[str, float], box2: Dict[str, float]) -> float:
     """
     Calculates containment ratio (intersection area over smaller box area) between two 0-1000 scale bounding boxes.
