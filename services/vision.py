@@ -116,7 +116,8 @@ CRITICAL RULES:
 - Return a complete and valid JSON object.
 """
 
-from utils.coordinate_utils import sanitize_box, calculate_iou, calculate_containment
+from utils.coordinate_utils import sanitize_box, calculate_iou, calculate_containment, box_2d_to_dict
+from pydantic import BaseModel, Field
 
 GENERIC_OBJECT_NAMES = {"round object", "object", "thing", "item", "shape", "blob", "miscellaneous", "unknown"}
 
@@ -168,23 +169,25 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
 
             iou = calculate_iou(box_i, box_j)
             containment = calculate_containment(box_i, box_j)
+            is_i_generic = cat_i in GENERIC_OBJECT_NAMES
+            is_j_generic = cat_j in GENERIC_OBJECT_NAMES
 
-            # If two boxes cover virtually the same area (IoU >= 0.45 or containment >= 0.70)
-            if iou >= 0.45 or containment >= 0.70:
-                is_i_generic = cat_i in GENERIC_OBJECT_NAMES
-                is_j_generic = cat_j in GENERIC_OBJECT_NAMES
-
-                if is_i_generic and not is_j_generic:
-                    discard_indices.add(i)
-                    logger.info(f"Deduplicating box: Discarding generic '{cat_i}' instance '{inst_i.id}' in favor of specific '{cat_j}' instance '{inst_j.id}' (IoU={iou:.2f})")
+            # NOTE: containment must NEVER be used across different categories.
+            # A watch lying on a towel, a mouse on a desk, or a plant pot holding a plant are all
+            # legitimately "inside" a bigger box. Using containment there silently deleted real objects.
+            if cat_i == cat_j:
+                # Same category: only drop near-identical boxes (true duplicates)
+                if iou >= 0.60 or (containment >= 0.90 and iou >= 0.45):
+                    discard_indices.add(j)
+                    logger.info(f"Dedup: dropping duplicate '{inst_j.id}' of '{inst_i.id}' (IoU={iou:.2f})")
+            elif iou >= 0.50 and (is_i_generic != is_j_generic):
+                # Different names, same physical space, one of them generic ("round object"):
+                # keep the specific one.
+                loser = i if is_i_generic else j
+                discard_indices.add(loser)
+                logger.info(f"Dedup: dropping generic box in favor of specific one (IoU={iou:.2f})")
+                if loser == i:
                     break
-                elif is_j_generic and not is_i_generic:
-                    discard_indices.add(j)
-                    logger.info(f"Deduplicating box: Discarding generic '{cat_j}' instance '{inst_j.id}' in favor of specific '{cat_i}' instance '{inst_i.id}' (IoU={iou:.2f})")
-                else:
-                    # Same category or equal specificity: keep earlier instance and discard duplicate
-                    discard_indices.add(j)
-                    logger.info(f"Deduplicating duplicate box: Discarding instance '{inst_j.id}' ('{cat_j}') duplicate of '{inst_i.id}' ('{cat_i}') (IoU={iou:.2f})")
 
     # Apply discards
     for idx in discard_indices:
@@ -192,6 +195,132 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
         inst_to_discard.bounding_box = None
 
     return result
+
+
+
+# ---------------------------------------------------------------------------
+# DEDICATED LOCALIZATION PASS
+# Gemini is trained to emit boxes as {"box_2d": [ymin, xmin, ymax, xmax], "label": ...}
+# on a 0-1000 grid. Asking for it inside a huge "counting + attributes + scene" JSON schema
+# with custom x_min/y_min keys makes boxes loose/misplaced. So we run a small, focused
+# detection call and use its boxes to replace the ones from the big analysis call.
+# ---------------------------------------------------------------------------
+
+class LocalizedBox(BaseModel):
+    label: str = Field(description="Object category label, exactly one of the requested categories.")
+    box_2d: List[int] = Field(description="[ymin, xmin, ymax, xmax] normalized to 0-1000 (Y FIRST).")
+
+
+LOCALIZATION_TIMEOUT = 30.0
+
+
+def _label_match(a: str, b: str) -> bool:
+    a, b = a.strip().lower(), b.strip().lower()
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    ta = {t.rstrip("s") for t in a.split()}
+    tb = {t.rstrip("s") for t in b.split()}
+    return bool(ta & tb)
+
+
+def localize_objects(image_part: types.Part, api_key: str, categories: List[Tuple[str, int]], model_name: str) -> List[dict]:
+    """
+    Focused detection call. Returns [{'label': str, 'box': {'x_min','y_min','x_max','y_max'}}] (0-1000, x/y order).
+    """
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(LOCALIZATION_TIMEOUT * 1000))
+    )
+    wanted = ", ".join(f"{name} (about {cnt})" for name, cnt in categories)
+    prompt = (
+        f"Detect every visible instance of these objects: {wanted}.\n"
+        "Return a JSON list. Each item: {\"label\": <one of the requested names>, "
+        "\"box_2d\": [ymin, xmin, ymax, xmax]} with coordinates normalized to 0-1000.\n"
+        "Rules: one tight box per physical object, hugging its visible edges (no padding, no neighbours); "
+        "never one box around a group; do not box the table/background; ymin/ymax are vertical, xmin/xmax horizontal."
+    )
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=List[LocalizedBox],
+        temperature=0.0,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        # Thinking hurts box precision on 2.5 Flash and costs latency; Google recommends turning it off for detection.
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    response = client.models.generate_content(model=model_name, contents=[image_part, prompt], config=config)
+    raw = response.text if response and getattr(response, "text", None) else ""
+    data = json.loads(clean_json_text(raw)) if raw else []
+    if isinstance(data, dict):
+        data = data.get("objects") or data.get("detections") or []
+
+    out = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        box = box_2d_to_dict(item.get("box_2d") or item.get("box2d"))
+        label = str(item.get("label") or "").strip().lower()
+        if box and label:
+            out.append({"label": label, "box": box})
+    return out
+
+
+def refine_bounding_boxes(result: GroundedAnalysisResult, image_part: types.Part, api_key: str, model_name: str) -> GroundedAnalysisResult:
+    """
+    Replaces the (loose) boxes of the main analysis with boxes from the dedicated localization pass.
+    Never raises: on any failure the original boxes are kept.
+    """
+    categories = [(c.name.strip().lower(), max(len(c.instances), c.confirmed_count)) for c in result.objects if c.instances]
+    if not categories:
+        return result
+
+    try:
+        t0 = time.perf_counter()
+        detections = localize_objects(image_part, api_key, categories, model_name)
+        logger.info(f"[LOCALIZE] {len(detections)} boxes in {time.perf_counter() - t0:.2f}s")
+    except Exception as e:
+        logger.warning(f"[LOCALIZE_FAILED] keeping original boxes: {e}")
+        return result
+
+    if not detections:
+        return result
+
+    # Drop duplicate detections of the same label (NMS)
+    kept: List[dict] = []
+    for d in sorted(detections, key=lambda d: (d["box"]["y_max"] - d["box"]["y_min"]) * (d["box"]["x_max"] - d["box"]["x_min"])):
+        if any(k["label"] == d["label"] and calculate_iou(k["box"], d["box"]) >= 0.6 for k in kept):
+            continue
+        kept.append(d)
+
+    used = set()
+    for cat in result.objects:
+        name = cat.name.strip().lower()
+        # Prefer exact label matches, then fuzzy ones
+        mine = [i for i, d in enumerate(kept) if i not in used and d["label"] == name]
+        mine += [i for i, d in enumerate(kept) if i not in used and i not in mine and _label_match(d["label"], name)]
+        if not mine:
+            continue  # nothing found for this category: keep the original boxes as a fallback
+        used.update(mine)
+
+        # Stable reading order (top->bottom, then left->right) so ids map to boxes deterministically
+        mine.sort(key=lambda i: ((kept[i]["box"]["y_min"] + kept[i]["box"]["y_max"]) / 2,
+                                 (kept[i]["box"]["x_min"] + kept[i]["box"]["x_max"]) / 2))
+
+        for pos, inst in enumerate(cat.instances):
+            if pos < len(mine):
+                b = kept[mine[pos]]["box"]
+                inst.bounding_box = _make_box(b)
+            else:
+                # Localization knows of fewer objects than the analysis claimed: don't show a made-up box.
+                inst.bounding_box = None
+
+    return result
+
+
+def _make_box(b: dict):
+    from services.schemas import BoundingBox
+    return BoundingBox(**b)
 
 
 def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, image_width: int = 0, image_height: int = 0) -> GroundedAnalysisResult:
@@ -349,6 +478,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
                     raise ValueError(f"SCHEMA_VALIDATION_ERROR: Model '{model_name}' response did not match expected GroundedAnalysisResult schema.")
 
                 final_res = sanitize_bounding_boxes(raw_result)
+                final_res = refine_bounding_boxes(final_res, image_part, api_key, model_name)
                 logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}).")
                 return final_res
 
