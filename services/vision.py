@@ -30,6 +30,8 @@ STEP 1: FULL IMAGE SCAN & ENTITY DETECTION
 - DO NOT count reflections, shadows, or images shown inside screens/posters/photos as real physical objects.
 - OBJECT CATEGORY CONTROL: Detect up to a maximum of 15 primary, clearly visible physical object categories. Do NOT produce an endless list of trivial background micro-objects (such as individual leaves, tiny pebbles, or distant background specks).
 - OBJECT & FIGURINE RECOGNITION: Accurately identify specific decorative items, figurines, statuettes, and sculptures (e.g. 'elephant figurine', 'animal statue', 'plant', 'computer mouse', 'smartwatch', 'towel') by their actual visually observable shape and characteristics. Do NOT use lazy generic names (such as 'round object', 'thing', or 'item') when the object has a distinct form like an elephant figurine or carved statue.
+- WHOLE PHYSICAL OBJECTS ONLY: Detect complete, whole physical objects. Do NOT break down a composite object into its sub-components (e.g. do NOT detect 'cord', 'wire', or 'coil' of headphones separately from the headphones; do NOT detect 'keys' separately from the keyboard; do NOT detect 'trackpad' or 'screen' separately from the laptop). Always detect the whole physical entity!
+- NO ARTIFACT OR BACKGROUND FRAGMENTS: Never create bounding boxes for empty table/desk space, shadows, gaps between objects, or detached cords.
 
 STEP 2: PHYSICAL INSTANCE COUNTING & DEDUPLICATION
 - Count distinct physical instances.
@@ -52,11 +54,12 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
   * ymax = Bottommost vertical edge of the object (0 to 1000, MUST be > ymin)
   * xmax = Rightmost horizontal edge of the object (0 to 1000, MUST be > xmin)
 - CRITICAL BOUNDING BOX ACCURACY RULES:
-  1. TIGHT FIT: The bounding box MUST tightly surround ONLY the visible physical extent of that specific object instance. Do NOT include surrounding background, empty desk/table space, cords, wires, or shadows. Oversized boxes are WRONG.
-  2. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
-  3. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
-  4. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
-  5. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'box_2d': null. NEVER return fake or estimated coordinates!
+  1. TIGHT VISUAL FIT: The bounding box MUST tightly hug the outermost visible physical pixels of the object. No extra margins, background padding, or shadows. Oversized or loose boxes are WRONG.
+  2. ADJACENT OBJECTS (NO OVERLAP BLEED): When two objects are placed next to each other (e.g. keyboard and mouse, or book and sunglasses), their bounding boxes MUST cleanly stop at their boundary and NOT bleed into or overlap each other.
+  3. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
+  4. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
+  5. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
+  6. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'box_2d': null. NEVER return fake or estimated coordinates!
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
@@ -120,7 +123,10 @@ from utils.coordinate_utils import (
     box_2d_to_dict
 )
 
-GENERIC_OBJECT_NAMES = {"round object", "object", "thing", "item", "shape", "blob", "miscellaneous", "unknown"}
+GENERIC_OBJECT_NAMES = {
+    "round object", "small round object", "object", "thing", "item", "shape",
+    "blob", "miscellaneous", "unknown", "coil", "cord", "cable", "wire", "part"
+}
 
 # Safe, unambiguous category aliases to prevent aggressive false matches
 SAFE_CATEGORY_ALIASES = {
@@ -143,12 +149,18 @@ SAFE_CATEGORY_ALIASES = {
     "computer keyboard": "keyboard",
     "wristwatch": "watch",
     "smartwatch": "watch",
+    "watches": "watch",
     "elephant figurine": "elephant",
     "elephant statue": "elephant",
     "headphone": "headphones",
     "earphone": "headphones",
     "earphones": "headphones",
     "headset": "headphones",
+    "usb": "adapter",
+    "usb adapter": "adapter",
+    "power adapter": "adapter",
+    "wall adapter": "adapter",
+    "charger": "adapter",
 }
 
 def normalize_label(label: str) -> str:
@@ -187,12 +199,84 @@ def labels_match(label1: str, label2: str) -> bool:
         return False
     return n1 == n2
 
+def resolve_adjacent_box_overlaps(instances: List[Tuple[str, ObjectInstance, Dict[str, float]]]) -> None:
+    """
+    Resolves accidental boundary overlap between distinct adjacent physical objects.
+    When two adjacent objects have a slight boundary overlap (0 < IoU <= 0.35),
+    adjusts their shared boundary to the midpoint so they cleanly touch without overlapping.
+    """
+    n = len(instances)
+    for i in range(n):
+        for j in range(i + 1, n):
+            _, inst_i, _ = instances[i]
+            _, inst_j, _ = instances[j]
+
+            if inst_i.bounding_box is None or inst_j.bounding_box is None:
+                continue
+
+            bi = inst_i.bounding_box
+            bj = inst_j.bounding_box
+
+            # Current coordinates
+            x_ov_min = max(bi.x_min, bj.x_min)
+            x_ov_max = min(bi.x_max, bj.x_max)
+            y_ov_min = max(bi.y_min, bj.y_min)
+            y_ov_max = min(bi.y_max, bj.y_max)
+
+            if x_ov_max <= x_ov_min or y_ov_max <= y_ov_min:
+                continue
+
+            ov_w = x_ov_max - x_ov_min
+            ov_h = y_ov_max - y_ov_min
+
+            box_i = {'x_min': bi.x_min, 'y_min': bi.y_min, 'x_max': bi.x_max, 'y_max': bi.y_max}
+            box_j = {'x_min': bj.x_min, 'y_min': bj.y_min, 'x_max': bj.x_max, 'y_max': bj.y_max}
+            iou = calculate_iou(box_i, box_j)
+            containment = calculate_containment(box_i, box_j)
+
+            # Only adjust side-by-side or stacked boundary overlap (moderate overlap)
+            if iou > 0.35 or containment >= 0.65:
+                continue
+
+            if ov_w < ov_h:
+                # Horizontally adjacent (side-by-side)
+                if (bi.x_min + bi.x_max) < (bj.x_min + bj.x_max):
+                    # Box i is on left, Box j is on right
+                    split_x = round((bi.x_max + bj.x_min) / 2.0, 1)
+                    if (split_x - bi.x_min) >= 10.0 and (bj.x_max - split_x) >= 10.0:
+                        bi.x_max = split_x
+                        bj.x_min = split_x
+                        logger.info(f"[ADJACENT_SEPARATION] Split X between {inst_i.id} and {inst_j.id} at x={split_x}")
+                else:
+                    # Box j is on left, Box i is on right
+                    split_x = round((bj.x_max + bi.x_min) / 2.0, 1)
+                    if (split_x - bj.x_min) >= 10.0 and (bi.x_max - split_x) >= 10.0:
+                        bj.x_max = split_x
+                        bi.x_min = split_x
+                        logger.info(f"[ADJACENT_SEPARATION] Split X between {inst_j.id} and {inst_i.id} at x={split_x}")
+            else:
+                # Vertically adjacent (stacked)
+                if (bi.y_min + bi.y_max) < (bj.y_min + bj.y_max):
+                    # Box i is on top, Box j is on bottom
+                    split_y = round((bi.y_max + bj.y_min) / 2.0, 1)
+                    if (split_y - bi.y_min) >= 10.0 and (bj.y_max - split_y) >= 10.0:
+                        bi.y_max = split_y
+                        bj.y_min = split_y
+                        logger.info(f"[ADJACENT_SEPARATION] Split Y between {inst_i.id} and {inst_j.id} at y={split_y}")
+                else:
+                    # Box j is on top, Box i is on bottom
+                    split_y = round((bj.y_max + bi.y_min) / 2.0, 1)
+                    if (split_y - bj.y_min) >= 10.0 and (bi.y_max - split_y) >= 10.0:
+                        bj.y_max = split_y
+                        bi.y_min = split_y
+                        logger.info(f"[ADJACENT_SEPARATION] Split Y between {inst_j.id} and {inst_i.id} at y={split_y}")
+
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
-    Validates, sanitizes, and deduplicates bounding boxes across all object instances.
+    Validates, sanitizes, deduplicates, and separates overlapping bounding boxes across all object instances.
     1. Validates coordinates [0, 1000], auto-repairs minor inversions, and discards zero/tiny area boxes (< 5 units).
-    2. Performs conservative NMS deduplication to eliminate duplicate boxes covering the exact same physical space,
-       while carefully preserving valid overlapping objects (overlapping people, stacked items).
+    2. Performs NMS deduplication & sub-part suppression (IoU & Containment NMS).
+    3. Resolves accidental boundary overlaps between distinct adjacent physical objects.
     """
     all_instances = []
 
@@ -218,7 +302,7 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     logger.warning(f"Discarding tiny/zero-area bounding box for instance {instance.id}")
                     instance.bounding_box = None
 
-    # Step 2: Overlap deduplication (IoU & Containment NMS)
+    # Step 2: Overlap deduplication & sub-part suppression (IoU & Containment NMS)
     n = len(all_instances)
     discard_indices = set()
 
@@ -226,35 +310,55 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
         if i in discard_indices:
             continue
         cat_i, inst_i, box_i = all_instances[i]
+        area_i = (box_i['x_max'] - box_i['x_min']) * (box_i['y_max'] - box_i['y_min'])
 
         for j in range(i + 1, n):
             if j in discard_indices:
                 continue
             cat_j, inst_j, box_j = all_instances[j]
+            area_j = (box_j['x_max'] - box_j['x_min']) * (box_j['y_max'] - box_j['y_min'])
 
             iou = calculate_iou(box_i, box_j)
             containment = calculate_containment(box_i, box_j)
             is_i_generic = cat_i in GENERIC_OBJECT_NAMES
             is_j_generic = cat_j in GENERIC_OBJECT_NAMES
+            is_alias_match = labels_match(cat_i, cat_j)
 
-            if cat_i == cat_j:
-                # Same category: only drop near-identical duplicate boxes (IoU >= 0.85)
-                # Avoid dropping legitimate overlapping items (e.g. 2 overlapping pens, overlapping people)
-                if iou >= 0.85 or (containment >= 0.95 and iou >= 0.80):
-                    discard_indices.add(j)
-                    logger.info(f"Dedup: dropping identical duplicate '{inst_j.id}' of '{inst_i.id}' (IoU={iou:.2f})")
-            elif iou >= 0.60 and (is_i_generic != is_j_generic):
-                # Different names, same physical space, one is generic ("round object"): keep specific one
-                loser = i if is_i_generic else j
+            # Rule A: High IoU (>= 0.50) or high containment (>= 0.75) between matching/alias categories -> drop duplicate
+            if is_alias_match and (iou >= 0.50 or containment >= 0.75):
+                loser = j if area_i >= area_j else i
                 discard_indices.add(loser)
-                logger.info(f"Dedup: dropping generic box in favor of specific one (IoU={iou:.2f})")
+                logger.info(f"Dedup: dropping alias duplicate between '{inst_i.id}' and '{inst_j.id}' (IoU={iou:.2f}, containment={containment:.2f})")
                 if loser == i:
                     break
+
+            # Rule B: One is a generic name / sub-part and significantly overlaps (IoU >= 0.35 or containment >= 0.60)
+            elif (is_i_generic != is_j_generic) and (iou >= 0.35 or containment >= 0.60):
+                loser = i if is_i_generic else j
+                discard_indices.add(loser)
+                logger.info(f"Dedup: dropping generic box '{all_instances[loser][1].id}' in favor of specific item (IoU={iou:.2f})")
+                if loser == i:
+                    break
+
+            # Rule C: Heavy nested containment (containment >= 0.80) where one box is a small sub-part of another (area ratio < 0.35)
+            elif containment >= 0.80:
+                min_area = min(area_i, area_j)
+                max_area = max(area_i, area_j)
+                if max_area > 0 and (min_area / max_area) < 0.35:
+                    loser = j if area_j < area_i else i
+                    discard_indices.add(loser)
+                    logger.info(f"Dedup: dropping small nested sub-part '{all_instances[loser][1].id}' (containment={containment:.2f})")
+                    if loser == i:
+                        break
 
     # Apply discards
     for idx in discard_indices:
         _, inst_to_discard, _ = all_instances[idx]
         inst_to_discard.bounding_box = None
+
+    # Step 3: Adjacent Box Boundary Separation
+    active_instances = [all_instances[i] for i in range(n) if i not in discard_indices]
+    resolve_adjacent_box_overlaps(active_instances)
 
     return result
 
@@ -285,11 +389,13 @@ def localize_objects(
     )
     wanted = ", ".join(f"{name} (about {cnt})" for name, cnt in categories)
     prompt = (
-        f"Detect every visible instance of these objects: {wanted}.\n"
+        f"Detect every visible physical instance of these objects: {wanted}.\n"
         "Return a JSON list. Each item: {\"label\": <one of the requested names>, "
         "\"box_2d\": [ymin, xmin, ymax, xmax]} with coordinates normalized to 0-1000.\n"
-        "Rules: one tight box per physical object, hugging its visible edges (no padding, no neighbours); "
-        "never one box around a group; do not box the table/background; ymin/ymax are vertical, xmin/xmax horizontal."
+        "CRITICAL BOUNDING BOX RULES:\n"
+        "1. TIGHT VISUAL FIT: Box MUST hug the outermost visible physical pixels of the object. Zero extra padding, zero desk/background space, zero shadows.\n"
+        "2. NO ADJACENT OVERLAPPING: When two objects sit next to each other, their bounding boxes MUST NOT overlap or bleed into each other. Stop at the exact boundary separating them.\n"
+        "3. WHOLE PHYSICAL OBJECTS: Box the entire object, never detached cords, sub-parts, or groups. Exactly one tight box per individual object."
     )
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -627,6 +733,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
 
                 final_res = sanitize_bounding_boxes(raw_result)
                 final_res = refine_bounding_boxes(final_res, image_part, api_key, model_name)
+                final_res = sanitize_bounding_boxes(final_res)
                 logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}).")
                 return final_res
 

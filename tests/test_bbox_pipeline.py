@@ -331,6 +331,88 @@ class TestBoundingBoxPipeline(unittest.TestCase):
         self.assertEqual(refined_box.x_min, 700.0)
         self.assertEqual(refined_box.x_max, 980.0)
 
+    def test_resolve_adjacent_box_overlaps_horizontal(self):
+        """
+        Verify that when two adjacent objects (e.g. keyboard and sunglasses) have an accidental
+        horizontal boundary overlap (e.g. 20px), their boundary is split to eliminate the overlap.
+        """
+        inst_glasses = ObjectInstance(
+            id="sunglasses_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=400.0, y_min=400.0, x_max=520.0, y_max=600.0)
+        )
+        inst_keyboard = ObjectInstance(
+            id="keyboard_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=500.0, y_min=400.0, x_max=700.0, y_max=700.0)
+        )
+        cat1 = DetectedObjectCategory(name="sunglasses", confirmed_count=1, instances=[inst_glasses])
+        cat2 = DetectedObjectCategory(name="keyboard", confirmed_count=1, instances=[inst_keyboard])
+        res = GroundedAnalysisResult(objects=[cat1, cat2], scene=SceneDescription(), overall_summary="Desk items.")
+
+        sanitized = sanitize_bounding_boxes(res)
+        g_box = sanitized.objects[0].instances[0].bounding_box
+        k_box = sanitized.objects[1].instances[0].bounding_box
+
+        # Split point should be (520 + 500) / 2 = 510.0
+        self.assertEqual(g_box.x_max, 510.0)
+        self.assertEqual(k_box.x_min, 510.0)
+        # Verify zero horizontal overlap
+        self.assertLessEqual(g_box.x_max, k_box.x_min)
+
+    def test_subpart_suppression_coil_in_headphones(self):
+        """
+        Verify that a small nested sub-part (e.g. 'coil' or 'cable') heavily contained
+        inside a whole object (e.g. 'headphones') is suppressed in favor of the whole object.
+        """
+        inst_headphones = ObjectInstance(
+            id="headphones_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=200.0, y_min=500.0, x_max=450.0, y_max=750.0)
+        )
+        inst_coil = ObjectInstance(
+            id="coil_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=280.0, y_min=550.0, x_max=380.0, y_max=700.0)
+        )
+        cat1 = DetectedObjectCategory(name="headphones", confirmed_count=1, instances=[inst_headphones])
+        cat2 = DetectedObjectCategory(name="coil", confirmed_count=1, instances=[inst_coil])
+        res = GroundedAnalysisResult(objects=[cat1, cat2], scene=SceneDescription(), overall_summary="Headphones on desk.")
+
+        sanitized = sanitize_bounding_boxes(res)
+        # Headphones box must be preserved
+        self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
+        # Sub-part coil box must be suppressed
+        self.assertIsNone(sanitized.objects[1].instances[0].bounding_box)
+
+    def test_alias_deduplication_usb_adapter(self):
+        """
+        Verify that overlapping duplicate boxes for the same item under alias names
+        (e.g. 'usb' and 'usb adapter') are deduplicated.
+        """
+        inst_usb = ObjectInstance(
+            id="usb_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=500.0, y_min=200.0, x_max=550.0, y_max=240.0)
+        )
+        inst_adapter = ObjectInstance(
+            id="usb adapter_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=495.0, y_min=198.0, x_max=555.0, y_max=242.0)
+        )
+        cat1 = DetectedObjectCategory(name="usb", confirmed_count=1, instances=[inst_usb])
+        cat2 = DetectedObjectCategory(name="usb adapter", confirmed_count=1, instances=[inst_adapter])
+        res = GroundedAnalysisResult(objects=[cat1, cat2], scene=SceneDescription(), overall_summary="Adapter on desk.")
+
+        sanitized = sanitize_bounding_boxes(res)
+        boxes = [
+            sanitized.objects[0].instances[0].bounding_box,
+            sanitized.objects[1].instances[0].bounding_box
+        ]
+        active_boxes = [b for b in boxes if b is not None]
+        # Exactly ONE box must remain
+        self.assertEqual(len(active_boxes), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
