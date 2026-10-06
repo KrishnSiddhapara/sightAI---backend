@@ -378,9 +378,9 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
             same_category = (cat_i == cat_j)
 
             # Rule A: Same or alias categories deduplication
-            # High IoU (>= 0.40), high containment (>= 0.65), or near-coincident centers (center_dist <= 30px with IoU >= 0.20)
+            # Relaxed NMS IoU threshold (>= 0.45) to prevent merging closely packed distinct objects
             if (same_category or is_alias_match) and (
-                iou >= 0.40 or containment >= 0.65 or (center_dist <= 30.0 and iou >= 0.20)
+                iou >= 0.45 or containment >= 0.70 or (center_dist <= 30.0 and iou >= 0.25)
             ):
                 loser = j if area_i >= area_j else i
                 discard_indices.add(loser)
@@ -417,12 +417,12 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
             # Applies ONLY when:
             # 1. Categories are DIFFERENT and NOT aliases.
             # 2. NEITHER category is a supporting surface (e.g. towel, mat, tray, table - objects sit on surfaces!).
-            # 3. High mutual footprint overlap (IoU >= 0.35, or high containment >= 0.65 with comparable area ratio >= 0.40).
+            # 3. High mutual footprint overlap (IoU >= 0.45 to prevent dropping closely packed distinct objects).
             elif (
                 not same_category
                 and not is_alias_match
                 and (cat_i not in SURFACE_OBJECT_NAMES and cat_j not in SURFACE_OBJECT_NAMES)
-                and (iou >= 0.35 or (containment >= 0.65 and area_ratio >= 0.40))
+                and (iou >= 0.45 or (containment >= 0.70 and area_ratio >= 0.45))
             ):
                 count_i = sum(1 for c, _, _ in all_instances if c == cat_i)
                 count_j = sum(1 for c, _, _ in all_instances if c == cat_j)
