@@ -413,6 +413,40 @@ class TestBoundingBoxPipeline(unittest.TestCase):
         # Exactly ONE box must remain
         self.assertEqual(len(active_boxes), 1)
 
+    def test_cross_category_physical_exclusion_candle_vs_figurine(self):
+        """
+        Verify that when two distinct solid physical objects overlap heavily
+        (e.g. candle and an erroneous elephant figurine overlapping on the candle),
+        the spurious multi-instance box is dropped and the unique candle is preserved.
+        """
+        inst_candle = ObjectInstance(
+            id="candle_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=400.0, y_min=500.0, x_max=500.0, y_max=650.0)
+        )
+        # Elephant figurine 2 heavily overlaps the exact candle location
+        inst_elephant1 = ObjectInstance(
+            id="elephant figurine_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=700.0, y_min=100.0, x_max=800.0, y_max=300.0)
+        )
+        inst_elephant2 = ObjectInstance(
+            id="elephant figurine_2",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=395.0, y_min=510.0, x_max=495.0, y_max=645.0)
+        )
+        cat_candle = DetectedObjectCategory(name="candle", confirmed_count=1, instances=[inst_candle])
+        cat_elephant = DetectedObjectCategory(name="elephant figurine", confirmed_count=2, instances=[inst_elephant1, inst_elephant2])
+        res = GroundedAnalysisResult(objects=[cat_candle, cat_elephant], scene=SceneDescription(), overall_summary="Candle and figurines.")
+
+        sanitized = sanitize_bounding_boxes(res)
+        # Candle box must remain intact
+        self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
+        # Legitimate elephant figurine 1 must remain intact
+        self.assertIsNotNone(sanitized.objects[1].instances[0].bounding_box)
+        # Spurious elephant figurine 2 on candle must be suppressed
+        self.assertIsNone(sanitized.objects[1].instances[1].bounding_box)
+
 
 if __name__ == "__main__":
     unittest.main()

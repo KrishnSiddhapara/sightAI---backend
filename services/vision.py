@@ -29,14 +29,18 @@ STEP 1: FULL IMAGE SCAN & ENTITY DETECTION
 - Distinguish between real physical objects in the 3D scene vs reflections in mirrors/glass, shadows on surfaces, or pictures shown inside posters/TV screens/paintings.
 - DO NOT count reflections, shadows, or images shown inside screens/posters/photos as real physical objects.
 - OBJECT CATEGORY CONTROL: Detect up to a maximum of 15 primary, clearly visible physical object categories. Do NOT produce an endless list of trivial background micro-objects (such as individual leaves, tiny pebbles, or distant background specks).
-- OBJECT & FIGURINE RECOGNITION: Accurately identify specific decorative items, figurines, statuettes, and sculptures (e.g. 'elephant figurine', 'animal statue', 'plant', 'computer mouse', 'smartwatch', 'towel') by their actual visually observable shape and characteristics. Do NOT use lazy generic names (such as 'round object', 'thing', or 'item') when the object has a distinct form like an elephant figurine or carved statue.
+- ACCURATE OBJECT CATEGORY DISAMBIGUATION:
+  * Organic vs Synthetic: A 'plant' MUST have real organic leaves, foliage, stems, or soil. Do NOT label smooth synthetic/plastic/metal containers, jars, pucks, or lids as 'plant' simply because they are green! A round jar/puck is a 'container' or 'round container'.
+  * Light / Candle vs Figurine: A candle or tea light with a wax body, wick, or flame is a 'candle', NEVER an 'elephant figurine' or statue.
+  * Sculptures / Figurines: Each elephant figurine must be a carved animal figure with ears/trunk/tusks. Never count a candle or empty space as an elephant figurine.
+  * One Box Per Unique Item: Each distinct item gets exactly ONE bounding box. Never place multiple boxes on the same figurine or overlap adjacent figurines.
 - WHOLE PHYSICAL OBJECTS ONLY: Detect complete, whole physical objects. Do NOT break down a composite object into its sub-components (e.g. do NOT detect 'cord', 'wire', or 'coil' of headphones separately from the headphones; do NOT detect 'keys' separately from the keyboard; do NOT detect 'trackpad' or 'screen' separately from the laptop). Always detect the whole physical entity!
-- NO ARTIFACT OR BACKGROUND FRAGMENTS: Never create bounding boxes for empty table/desk space, shadows, gaps between objects, or detached cords.
+- NO ARTIFACT OR EMPTY SPACE DETECTIONS: Never create bounding boxes on empty desk/table space, shadows, gaps between objects, or detached cords. Every box MUST tightly frame a real visible item.
 
 STEP 2: PHYSICAL INSTANCE COUNTING & DEDUPLICATION
 - Count distinct physical instances.
 - DO NOT double-count an object under different names (e.g. if an item is an 'elephant figurine', do NOT list it as 'elephant figurine' AND also as 'round object' or 'candle').
-- Standardize object category names to simple lowercase terms (e.g. 'person', 'car', 'dog', 'chair', 'bottle', 'bicycle', 'phone', 'elephant figurine', 'computer mouse', 'plant', 'towel').
+- Standardize object category names to simple lowercase terms (e.g. 'person', 'car', 'dog', 'chair', 'bottle', 'bicycle', 'phone', 'elephant figurine', 'computer mouse', 'plant', 'towel', 'candle', 'container').
 - For overlapping or partially hidden objects:
   * Count ONLY clearly distinguishable physical instances under 'confirmed_count'.
   * If an object is partially visible but cannot be confirmed, increment 'uncertain_count' and explain the reason in 'uncertainty_reason'. Do NOT guess or pad the confirmed count.
@@ -55,11 +59,12 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
   * xmax = Rightmost horizontal edge of the object (0 to 1000, MUST be > xmin)
 - CRITICAL BOUNDING BOX ACCURACY RULES:
   1. TIGHT VISUAL FIT: The bounding box MUST tightly hug the outermost visible physical pixels of the object. No extra margins, background padding, or shadows. Oversized or loose boxes are WRONG.
-  2. ADJACENT OBJECTS (NO OVERLAP BLEED): When two objects are placed next to each other (e.g. keyboard and mouse, or book and sunglasses), their bounding boxes MUST cleanly stop at their boundary and NOT bleed into or overlap each other.
-  3. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
-  4. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
-  5. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
-  6. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'box_2d': null. NEVER return fake or estimated coordinates!
+  2. EXACT OBJECT ANCHOR: The box MUST be placed directly on the visual center and extent of the object. Never shift a box onto empty space or onto a different neighboring object!
+  3. ADJACENT OBJECTS (NO OVERLAP): Two distinct tabletop objects NEVER occupy the exact same physical space. If two objects sit next to each other, their boxes must stop at the visual separation line and NOT bleed into or overlap each other.
+  4. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
+  5. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
+  6. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
+  7. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'box_2d': null. NEVER return fake or estimated coordinates!
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
@@ -202,8 +207,9 @@ def labels_match(label1: str, label2: str) -> bool:
 def resolve_adjacent_box_overlaps(instances: List[Tuple[str, ObjectInstance, Dict[str, float]]]) -> None:
     """
     Resolves accidental boundary overlap between distinct adjacent physical objects.
-    When two adjacent objects have a slight boundary overlap (0 < IoU <= 0.35),
+    When two adjacent objects have a slight boundary overlap (IoU <= 0.15, overlap <= 12% of box size),
     adjusts their shared boundary to the midpoint so they cleanly touch without overlapping.
+    Guaranteed to never significantly shift or shrink boxes away from the objects.
     """
     n = len(instances)
     for i in range(n):
@@ -234,12 +240,20 @@ def resolve_adjacent_box_overlaps(instances: List[Tuple[str, ObjectInstance, Dic
             iou = calculate_iou(box_i, box_j)
             containment = calculate_containment(box_i, box_j)
 
-            # Only adjust side-by-side or stacked boundary overlap (moderate overlap)
-            if iou > 0.35 or containment >= 0.65:
+            # Only adjust minor border bleed (IoU <= 0.15 and containment < 0.35)
+            if iou > 0.15 or containment >= 0.35:
                 continue
 
-            if ov_w < ov_h:
-                # Horizontally adjacent (side-by-side)
+            w_i = bi.x_max - bi.x_min
+            w_j = bj.x_max - bj.x_min
+            h_i = bi.y_max - bi.y_min
+            h_j = bj.y_max - bj.y_min
+
+            min_w = min(w_i, w_j)
+            min_h = min(h_i, h_j)
+
+            if ov_w < ov_h and min_w > 0 and (ov_w / min_w) <= 0.20:
+                # Horizontally adjacent (minor side-by-side bleed)
                 if (bi.x_min + bi.x_max) < (bj.x_min + bj.x_max):
                     # Box i is on left, Box j is on right
                     split_x = round((bi.x_max + bj.x_min) / 2.0, 1)
@@ -254,8 +268,8 @@ def resolve_adjacent_box_overlaps(instances: List[Tuple[str, ObjectInstance, Dic
                         bj.x_max = split_x
                         bi.x_min = split_x
                         logger.info(f"[ADJACENT_SEPARATION] Split X between {inst_j.id} and {inst_i.id} at x={split_x}")
-            else:
-                # Vertically adjacent (stacked)
+            elif ov_h <= ov_w and min_h > 0 and (ov_h / min_h) <= 0.20:
+                # Vertically adjacent (minor stacked bleed)
                 if (bi.y_min + bi.y_max) < (bj.y_min + bj.y_max):
                     # Box i is on top, Box j is on bottom
                     split_y = round((bi.y_max + bj.y_min) / 2.0, 1)
@@ -271,11 +285,12 @@ def resolve_adjacent_box_overlaps(instances: List[Tuple[str, ObjectInstance, Dic
                         bi.y_min = split_y
                         logger.info(f"[ADJACENT_SEPARATION] Split Y between {inst_j.id} and {inst_i.id} at y={split_y}")
 
+
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
     Validates, sanitizes, deduplicates, and separates overlapping bounding boxes across all object instances.
     1. Validates coordinates [0, 1000], auto-repairs minor inversions, and discards zero/tiny area boxes (< 5 units).
-    2. Performs NMS deduplication & sub-part suppression (IoU & Containment NMS).
+    2. Performs NMS deduplication, sub-part suppression, and cross-category physical exclusion.
     3. Resolves accidental boundary overlaps between distinct adjacent physical objects.
     """
     all_instances = []
@@ -302,7 +317,7 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     logger.warning(f"Discarding tiny/zero-area bounding box for instance {instance.id}")
                     instance.bounding_box = None
 
-    # Step 2: Overlap deduplication & sub-part suppression (IoU & Containment NMS)
+    # Step 2: Overlap deduplication, sub-part suppression & cross-category physical exclusion
     n = len(all_instances)
     discard_indices = set()
 
@@ -320,43 +335,69 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
 
             iou = calculate_iou(box_i, box_j)
             containment = calculate_containment(box_i, box_j)
+            center_dist = calculate_center_distance(box_i, box_j)
             is_i_generic = cat_i in GENERIC_OBJECT_NAMES
             is_j_generic = cat_j in GENERIC_OBJECT_NAMES
             is_alias_match = labels_match(cat_i, cat_j)
+            same_category = (cat_i == cat_j)
 
-            # Rule A: High IoU (>= 0.50) or high containment (>= 0.75) between matching/alias categories -> drop duplicate
-            if is_alias_match and (iou >= 0.50 or containment >= 0.75):
+            # Rule A: Same or alias categories deduplication
+            # High IoU (>= 0.40), high containment (>= 0.65), or near-coincident centers (center_dist <= 30px with IoU >= 0.20)
+            if (same_category or is_alias_match) and (
+                iou >= 0.40 or containment >= 0.65 or (center_dist <= 30.0 and iou >= 0.20)
+            ):
                 loser = j if area_i >= area_j else i
                 discard_indices.add(loser)
-                logger.info(f"Dedup: dropping alias duplicate between '{inst_i.id}' and '{inst_j.id}' (IoU={iou:.2f}, containment={containment:.2f})")
+                logger.info(f"Dedup: dropping duplicate between '{inst_i.id}' and '{inst_j.id}' (IoU={iou:.2f}, containment={containment:.2f}, center_dist={center_dist:.1f})")
                 if loser == i:
                     break
 
-            # Rule B: One is a generic name / sub-part and significantly overlaps (IoU >= 0.35 or containment >= 0.60)
-            elif (is_i_generic != is_j_generic) and (iou >= 0.35 or containment >= 0.60):
+            # Rule B: One is a generic name / sub-part and significantly overlaps (IoU >= 0.30 or containment >= 0.50)
+            elif (is_i_generic != is_j_generic) and (iou >= 0.30 or containment >= 0.50):
                 loser = i if is_i_generic else j
                 discard_indices.add(loser)
                 logger.info(f"Dedup: dropping generic box '{all_instances[loser][1].id}' in favor of specific item (IoU={iou:.2f})")
                 if loser == i:
                     break
 
-            # Rule C: Heavy nested containment (containment >= 0.80) where one box is a small sub-part of another (area ratio < 0.35)
-            elif containment >= 0.80:
-                min_area = min(area_i, area_j)
-                max_area = max(area_i, area_j)
-                if max_area > 0 and (min_area / max_area) < 0.35:
-                    loser = j if area_j < area_i else i
-                    discard_indices.add(loser)
-                    logger.info(f"Dedup: dropping small nested sub-part '{all_instances[loser][1].id}' (containment={containment:.2f})")
-                    if loser == i:
-                        break
+            # Rule C: Heavy nested containment (containment >= 0.75) where one box is a small sub-part of another (area ratio < 0.35)
+            elif containment >= 0.75 and min(area_i, area_j) > 0 and (min(area_i, area_j) / max(area_i, area_j)) < 0.35:
+                loser = j if area_j < area_i else i
+                discard_indices.add(loser)
+                logger.info(f"Dedup: dropping small nested sub-part '{all_instances[loser][1].id}' (containment={containment:.2f})")
+                if loser == i:
+                    break
+
+            # Rule D: Cross-Category Physical Exclusion
+            # Two distinct solid tabletop objects (e.g. candle vs elephant figurine) cannot occupy the same 3D space.
+            # Applies ONLY when categories are DIFFERENT and NOT aliases.
+            elif not same_category and not is_alias_match and (iou >= 0.30 or containment >= 0.50):
+                count_i = sum(1 for c, _, _ in all_instances if c == cat_i)
+                count_j = sum(1 for c, _, _ in all_instances if c == cat_j)
+
+                if is_i_generic != is_j_generic:
+                    loser = i if is_i_generic else j
+                elif count_i != count_j:
+                    # The multi-instance category (e.g. 5 elephant figurines) has a spurious extra box on the unique item (e.g. 1 candle)
+                    loser = i if count_i > count_j else j
+                else:
+                    loser = i if area_i > area_j else j
+
+                discard_indices.add(loser)
+                logger.info(
+                    f"Dedup: dropping cross-category collision '{all_instances[loser][1].id}' ({all_instances[loser][0]}) "
+                    f"colliding with '{all_instances[j if loser==i else i][1].id}' ({all_instances[j if loser==i else i][0]}) "
+                    f"(IoU={iou:.2f}, containment={containment:.2f})"
+                )
+                if loser == i:
+                    break
 
     # Apply discards
     for idx in discard_indices:
         _, inst_to_discard, _ = all_instances[idx]
         inst_to_discard.bounding_box = None
 
-    # Step 3: Adjacent Box Boundary Separation
+    # Step 3: Adjacent Box Boundary Separation (minor border bleeds only)
     active_instances = [all_instances[i] for i in range(n) if i not in discard_indices]
     resolve_adjacent_box_overlaps(active_instances)
 
@@ -501,18 +542,19 @@ def refine_bounding_boxes(
                 iou = calculate_iou(orig_b, cand_b)
                 center_dist = calculate_center_distance(orig_b, cand_b)
 
-                # Consistency check:
-                # 1. Significant IoU overlap (>= 0.15), OR
-                # 2. Moderate center proximity (<= 250px) with at least minor overlap (IoU >= 0.03), OR
-                # 3. Close center proximity (<= 180px), OR
-                # 4. Single-instance category match: if only 1 instance and 1 candidate for this category,
-                #    allow center distance up to 450px to recover from severe initial coordinate skew.
+                # Strict geometric consistency check:
+                # Refinement candidate MUST be anchored to the original detected object:
+                # 1. Clear geometric overlap: iou >= 0.15, OR
+                # 2. Moderate overlap with close center: iou >= 0.05 and center_dist <= 150.0, OR
+                # 3. Very close center proximity: center_dist <= 60.0 (where even tiny items coincide), OR
+                # 4. Single-pair with minor overlap: single_pair and iou >= 0.03 and center_dist <= 250.0.
+                # A candidate with 0 IoU and center_dist > 60px is REJECTED to prevent moving boxes to empty space!
                 single_pair = (len(boxed_instances) == 1 and len(candidate_indices) == 1)
                 is_consistent = (
                     iou >= 0.15 or
-                    (center_dist <= 250.0 and iou >= 0.03) or
-                    (center_dist <= 180.0) or
-                    (single_pair and center_dist <= 450.0)
+                    (center_dist <= 150.0 and iou >= 0.05) or
+                    (center_dist <= 60.0) or
+                    (single_pair and iou >= 0.03 and center_dist <= 250.0)
                 )
 
                 if is_consistent:
@@ -568,17 +610,38 @@ def refine_bounding_boxes(
                 )
 
         # For unboxed instances (originally None), assign remaining unused candidates if available
+        # BUT ONLY if candidate does NOT collide with an already assigned box in the scene
         remaining_candidates = [c for c in candidate_indices if c not in assigned_candidates and c not in used_detection_indices]
         for (u_pos, inst) in unboxed_instances:
-            if remaining_candidates:
+            while remaining_candidates:
                 c_idx = remaining_candidates.pop(0)
-                used_detection_indices.add(c_idx)
                 cand_b = kept_detections[c_idx]["box"]
-                inst.bounding_box = BoundingBox(**cand_b)
-                logger.info(
-                    f"[BBOX] category={cat_name} id={inst.id} original=None "
-                    f"localized=[{cand_b['x_min']},{cand_b['y_min']},{cand_b['x_max']},{cand_b['y_max']}] decision=ASSIGN_NEW"
-                )
+
+                # Collision check against existing boxes across all categories
+                collides_existing = False
+                for other_cat in result.objects:
+                    for other_inst in other_cat.instances:
+                        if other_inst.bounding_box is not None:
+                            ob = {
+                                'x_min': other_inst.bounding_box.x_min,
+                                'y_min': other_inst.bounding_box.y_min,
+                                'x_max': other_inst.bounding_box.x_max,
+                                'y_max': other_inst.bounding_box.y_max
+                            }
+                            if calculate_iou(cand_b, ob) >= 0.35 or calculate_containment(cand_b, ob) >= 0.55:
+                                collides_existing = True
+                                break
+                    if collides_existing:
+                        break
+
+                if not collides_existing:
+                    used_detection_indices.add(c_idx)
+                    inst.bounding_box = BoundingBox(**cand_b)
+                    logger.info(
+                        f"[BBOX] category={cat_name} id={inst.id} original=None "
+                        f"localized=[{cand_b['x_min']},{cand_b['y_min']},{cand_b['x_max']},{cand_b['y_max']}] decision=ASSIGN_NEW"
+                    )
+                    break
 
     return result
 
