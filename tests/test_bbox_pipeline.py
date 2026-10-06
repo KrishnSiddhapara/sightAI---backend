@@ -507,6 +507,33 @@ class TestBoundingBoxPipeline(unittest.TestCase):
         self.assertEqual(instances[1]["id"], "candle_2")
         self.assertEqual(instances[2]["id"], "candle_3")
 
+    def test_object_on_supporting_surface_preserved(self):
+        """
+        Verify that an independent object (e.g. smartwatch) sitting on a supporting surface
+        (e.g. white towel) is NOT suppressed by containment or collision exclusion.
+        """
+        # Large white towel
+        inst_towel = ObjectInstance(
+            id="towel_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=100.0, y_min=100.0, x_max=500.0, y_max=900.0)
+        )
+        # Smartwatch resting completely on top of the towel
+        inst_watch = ObjectInstance(
+            id="smartwatch_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=150.0, y_min=400.0, x_max=280.0, y_max=650.0)
+        )
+        cat_towel = DetectedObjectCategory(name="towel", confirmed_count=1, instances=[inst_towel])
+        cat_watch = DetectedObjectCategory(name="smartwatch", confirmed_count=1, instances=[inst_watch])
+        res = GroundedAnalysisResult(objects=[cat_towel, cat_watch], scene=SceneDescription(), overall_summary="Watch on towel.")
+
+        sanitized = sanitize_bounding_boxes(res)
+        # BOTH towel and smartwatch bounding boxes MUST be preserved!
+        self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
+        self.assertIsNotNone(sanitized.objects[1].instances[0].bounding_box)
+        self.assertEqual(sanitized.objects[1].instances[0].bounding_box.x_min, 150.0)
+
 
 if __name__ == "__main__":
     unittest.main()

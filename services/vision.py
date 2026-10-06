@@ -134,6 +134,17 @@ GENERIC_OBJECT_NAMES = {
     "blob", "miscellaneous", "unknown", "coil", "cord", "cable", "wire", "part"
 }
 
+SURFACE_OBJECT_NAMES = {
+    "towel", "white towel", "hand towel", "bath towel", "cloth", "table", "desk",
+    "mat", "desk mat", "mousepad", "mouse pad", "tray", "plate", "dish", "bowl",
+    "blanket", "bed", "floor", "rug", "carpet", "board", "shelf", "box", "basket", "napkin"
+}
+
+SUBPART_OBJECT_NAMES = {
+    "coil", "cord", "cable", "wire", "part", "wheel", "key", "button",
+    "screen", "strap", "handle", "plug", "dial", "switch"
+}
+
 # Safe, unambiguous category aliases to prevent aggressive false matches
 SAFE_CATEGORY_ALIASES = {
     "cellphone": "phone",
@@ -386,7 +397,15 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     break
 
             # Rule C: Heavy nested containment (containment >= 0.75) where one box is a small sub-part of another (area ratio < 0.35)
-            elif containment >= 0.75 and min(area_i, area_j) > 0 and (min(area_i, area_j) / max(area_i, area_j)) < 0.35:
+            # ONLY suppresses if the smaller object is an actual sub-part (coil, cord, wire) or generic name,
+            # and the larger object is NOT a surface/cloth (objects sit on towels/tables, they are not sub-parts of towels!)
+            smaller_cat = cat_j if area_j < area_i else cat_i
+            larger_cat = cat_i if area_j < area_i else cat_j
+            is_smaller_subpart = (smaller_cat in SUBPART_OBJECT_NAMES) or (smaller_cat in GENERIC_OBJECT_NAMES)
+            is_larger_surface = (larger_cat in SURFACE_OBJECT_NAMES)
+            area_ratio = (min(area_i, area_j) / max(area_i, area_j)) if max(area_i, area_j) > 0 else 0
+
+            if is_smaller_subpart and not is_larger_surface and containment >= 0.70 and area_ratio < 0.35:
                 loser = j if area_j < area_i else i
                 discard_indices.add(loser)
                 logger.info(f"Dedup: dropping small nested sub-part '{all_instances[loser][1].id}' (containment={containment:.2f})")
@@ -395,8 +414,16 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
 
             # Rule D: Cross-Category Physical Exclusion
             # Two distinct solid tabletop objects (e.g. candle vs elephant figurine) cannot occupy the same 3D space.
-            # Applies ONLY when categories are DIFFERENT and NOT aliases.
-            elif not same_category and not is_alias_match and (iou >= 0.30 or containment >= 0.50):
+            # Applies ONLY when:
+            # 1. Categories are DIFFERENT and NOT aliases.
+            # 2. NEITHER category is a supporting surface (e.g. towel, mat, tray, table - objects sit on surfaces!).
+            # 3. High mutual footprint overlap (IoU >= 0.35, or high containment >= 0.65 with comparable area ratio >= 0.40).
+            elif (
+                not same_category
+                and not is_alias_match
+                and (cat_i not in SURFACE_OBJECT_NAMES and cat_j not in SURFACE_OBJECT_NAMES)
+                and (iou >= 0.35 or (containment >= 0.65 and area_ratio >= 0.40))
+            ):
                 count_i = sum(1 for c, _, _ in all_instances if c == cat_i)
                 count_j = sum(1 for c, _, _ in all_instances if c == cat_j)
 
@@ -670,9 +697,21 @@ def refine_bounding_boxes(
                                 'x_max': other_inst.bounding_box.x_max,
                                 'y_max': other_inst.bounding_box.y_max
                             }
-                            if calculate_iou(cand_b, ob) >= 0.35 or calculate_containment(cand_b, ob) >= 0.55:
-                                collides_existing = True
-                                break
+                            other_is_surface = other_cat.name.lower() in SURFACE_OBJECT_NAMES
+                            this_is_surface = cat_name in SURFACE_OBJECT_NAMES
+                            cand_area = (cand_b['x_max'] - cand_b['x_min']) * (cand_b['y_max'] - cand_b['y_min'])
+                            ob_area = (ob['x_max'] - ob['x_min']) * (ob['y_max'] - ob['y_min'])
+                            rel_area_ratio = (min(cand_area, ob_area) / max(cand_area, ob_area)) if max(cand_area, ob_area) > 0 else 0
+
+                            if other_is_surface or this_is_surface:
+                                # Overlap with a supporting surface (e.g. smartwatch resting on towel) is normal unless identical
+                                if calculate_iou(cand_b, ob) >= 0.75:
+                                    collides_existing = True
+                                    break
+                            else:
+                                if calculate_iou(cand_b, ob) >= 0.35 or (calculate_containment(cand_b, ob) >= 0.65 and rel_area_ratio >= 0.40):
+                                    collides_existing = True
+                                    break
                     if collides_existing:
                         break
 
