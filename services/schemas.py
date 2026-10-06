@@ -13,6 +13,19 @@ class InstanceAttributes(BaseModel):
     type_or_subtype: Optional[str] = Field(default="unknown", description="Specific type or visual characteristic (e.g. 'sedan', 'mountain bike', 'coniferous fir').")
     visible_details: Optional[str] = Field(default="none noted", description="Notable visible characteristics belonging strictly to this single physical instance.")
 
+class ImageMetadata(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    original_width: int = Field(default=0, description="Original image width in pixels after EXIF normalization.")
+    original_height: int = Field(default=0, description="Original image height in pixels after EXIF normalization.")
+    analysis_width: int = Field(default=0, description="Width of the preprocessed image in pixels sent to VLM.")
+    analysis_height: int = Field(default=0, description="Height of the preprocessed image in pixels sent to VLM.")
+    scale_x: float = Field(default=1.0, description="Horizontal scale factor from original to analysis image.")
+    scale_y: float = Field(default=1.0, description="Vertical scale factor from original to analysis image.")
+    offset_x: int = Field(default=0, description="Horizontal crop/padding offset.")
+    offset_y: int = Field(default=0, description="Vertical crop/padding offset.")
+    rotation: int = Field(default=0, description="EXIF rotation applied in degrees.")
+
 class BoundingBox(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -28,8 +41,6 @@ class BoundingBox(BaseModel):
             return 0.0
         try:
             fv = float(v)
-            if 0.0 <= fv <= 1.0:
-                fv = fv * 1000.0
             return max(0.0, min(1000.0, round(fv, 2)))
         except (ValueError, TypeError):
             return 0.0
@@ -60,6 +71,7 @@ class SceneDescription(BaseModel):
 class GroundedAnalysisResult(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
+    image_metadata: Optional[ImageMetadata] = Field(default=None, description="Canonical source image dimension & transformation metadata.")
     objects: List[DetectedObjectCategory] = Field(default_factory=list, description="List of detected object categories with verified physical counts and independent instance attributes.")
     scene: SceneDescription = Field(default_factory=SceneDescription, description="Scene-level understanding grounded strictly in visible evidence.")
     overall_summary: str = Field(default="Executive summary of the image.", description="Executive summary built strictly from the verified structured objects and scene analysis.")

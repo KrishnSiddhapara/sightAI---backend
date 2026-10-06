@@ -33,7 +33,7 @@ STEP 1: FULL IMAGE SCAN & ENTITY DETECTION
 STEP 2: PHYSICAL INSTANCE COUNTING & DEDUPLICATION
 - Count distinct physical instances.
 - DO NOT double-count an object under different names (e.g. if an item is a 'car', do NOT list it as 'car' and also as 'vehicle' or 'automobile').
-- Standardize object category names to simple lowercase terms (e.g. 'person', 'car', 'dog', 'chair', 'bottle', 'bicycle').
+- Standardize object category names to simple lowercase terms (e.g. 'person', 'car', 'dog', 'chair', 'bottle', 'bicycle', 'phone', 'pen', 'cup').
 - For overlapping or partially hidden objects:
   * Count ONLY clearly distinguishable physical instances under 'confirmed_count'.
   * If an object is partially visible but cannot be confirmed, increment 'uncertain_count' and explain the reason in 'uncertainty_reason'. Do NOT guess or pad the confirmed count.
@@ -51,12 +51,13 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
   * x_max = Rightmost horizontal edge of the object (0 to 1000, MUST be > x_min)
   * y_max = Bottommost vertical edge of the object (0 to 1000, MUST be > y_min)
 - CRITICAL BOUNDING BOX ACCURACY RULES:
-  1. TIGHT FIT: The bounding box MUST tightly surround the visible physical extent of that specific object. Do NOT include unnecessary surrounding background space.
+  1. TIGHT FIT: The bounding box MUST tightly surround the visible physical extent of that specific object. Do NOT include unnecessary surrounding background space, and avoid oversized boxes.
   2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure horizontal left-to-right position; y_min and y_max measure vertical top-to-bottom position.
-  3. INDEPENDENT INSTANCES: Each physical instance (e.g., person_1, person_2, bottle_1, bottle_2) MUST have its own separate, independently calculated bounding box. NEVER copy or duplicate bounding box coordinates across different objects.
-  4. SMALL OBJECTS: For small items (e.g. phones, cups, balls, distant people), ensure the box is compact and tightly fitted to the object bounds.
-  5. OCCLUSION & BOUNDARIES: Enclose only the visible physical extent of the object. Do not invent bounding boxes for non-existent objects or areas outside the image frame.
-  6. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER return fake or estimated coordinates!
+  3. INDEPENDENT INSTANCES: Each physical instance (e.g., person_1, person_2, bottle_1, bottle_2) MUST have its own separate, independently calculated bounding box. NEVER copy, duplicate, or mirror bounding box coordinates across different objects.
+  4. SMALL OBJECTS: For small items (e.g. pens, phones, cups, bottles, remotes, computer mice, small electronics), detect them carefully and ensure the box is compact and tightly fitted to the visible object bounds. Do not omit small objects simply because they are small.
+  5. OVERLAPPING OBJECTS: For overlapping objects (e.g., multiple people sitting together, items on a table), preserve separate, distinct bounding boxes for each physical instance.
+  6. OCCLUSION & BOUNDARIES: Enclose only the visible physical extent of the object. Do not invent bounding boxes for non-existent objects or areas outside the image frame.
+  7. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER return fake or estimated coordinates!
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
@@ -110,38 +111,26 @@ CRITICAL RULES:
 - Return a complete and valid JSON object.
 """
 
+from utils.coordinate_utils import sanitize_box
+
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
     Validates and sanitizes bounding boxes across all object instances.
     Auto-repairs inverted coordinates (x_min > x_max or y_min > y_max) using min/max,
-    ensures boundaries are within [0, 1000], and discards boxes with zero/tiny area (< 2px in 1000 scale).
+    ensures boundaries are within [0, 1000], and discards boxes with zero/tiny area (< 2 units in 1000 scale).
     """
     for category in result.objects:
         for instance in category.instances:
             bbox = instance.bounding_box
             if bbox is not None:
-                try:
-                    x1 = max(0.0, min(1000.0, float(bbox.x_min)))
-                    y1 = max(0.0, min(1000.0, float(bbox.y_min)))
-                    x2 = max(0.0, min(1000.0, float(bbox.x_max)))
-                    y2 = max(0.0, min(1000.0, float(bbox.y_max)))
-
-                    x_min = min(x1, x2)
-                    x_max = max(x1, x2)
-                    y_min = min(y1, y2)
-                    y_max = max(y1, y2)
-
-                    # Ensure box has minimum visible dimension (at least 5 units in 1000 scale)
-                    if (x_max - x_min) >= 5.0 and (y_max - y_min) >= 5.0:
-                        bbox.x_min = round(x_min, 2)
-                        bbox.y_min = round(y_min, 2)
-                        bbox.x_max = round(x_max, 2)
-                        bbox.y_max = round(y_max, 2)
-                    else:
-                        logger.warning(f"Discarding tiny/zero-area bounding box for instance {instance.id}: [{x_min}, {y_min}, {x_max}, {y_max}]")
-                        instance.bounding_box = None
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Invalid bounding box types for instance {instance.id}: {e}")
+                sanitized = sanitize_box(bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max, min_size_px_in_1000=5.0)
+                if sanitized:
+                    bbox.x_min = sanitized['x_min']
+                    bbox.y_min = sanitized['y_min']
+                    bbox.x_max = sanitized['x_max']
+                    bbox.y_max = sanitized['y_max']
+                else:
+                    logger.warning(f"Discarding tiny/zero-area bounding box for instance {instance.id}")
                     instance.bounding_box = None
     return result
 

@@ -231,6 +231,12 @@ async def analyze_endpoint(request: Request, file: UploadFile = File(...)):
         t_vlm = time.perf_counter() - t0_vlm
         t_total = time.perf_counter() - t_start
 
+        # Attach canonical source image dimension & transformation metadata
+        from utils.coordinate_utils import compute_image_transformation_metadata
+        from services.schemas import ImageMetadata
+        meta_dict = compute_image_transformation_metadata(orig_w, orig_h, opt_w, opt_h)
+        grounded_result.image_metadata = ImageMetadata.model_validate(meta_dict)
+
         logger.info(
             f"[{req_id}] [PERF_BREAKDOWN] "
             f"UPLOAD: {t_upload:.3f}s | "

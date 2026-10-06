@@ -1,6 +1,8 @@
 import json
 import re
 
+from utils.coordinate_utils import parse_and_normalize_bbox
+
 def clean_json_text(text: str) -> str:
     """
     Cleans raw LLM response strings by stripping markdown code block wrappers
@@ -239,42 +241,7 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
 
             # Bounding Box
             raw_box = inst_item.get('bounding_box') or inst_item.get('boundingBox') or inst_item.get('box_2d') or inst_item.get('box2d')
-            norm_box = None
-
-            if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
-                # [ymin, xmin, ymax, xmax] -> x_min, y_min, x_max, y_max
-                try:
-                    vals = [float(v) for v in raw_box]
-                    if all(0.0 <= v <= 1.0 for v in vals):
-                        vals = [v * 1000.0 for v in vals]
-                    y1, x1, y2, x2 = vals
-                    norm_box = {
-                        'x_min': max(0, min(1000, int(round(min(x1, x2))))),
-                        'y_min': max(0, min(1000, int(round(min(y1, y2))))),
-                        'x_max': max(0, min(1000, int(round(max(x1, x2))))),
-                        'y_max': max(0, min(1000, int(round(max(y1, y2)))))
-                    }
-                except (ValueError, TypeError):
-                    norm_box = None
-            elif isinstance(raw_box, dict):
-                x_min = raw_box.get('x_min') if raw_box.get('x_min') is not None else raw_box.get('xmin', raw_box.get('xMin'))
-                y_min = raw_box.get('y_min') if raw_box.get('y_min') is not None else raw_box.get('ymin', raw_box.get('yMin'))
-                x_max = raw_box.get('x_max') if raw_box.get('x_max') is not None else raw_box.get('xmax', raw_box.get('xMax'))
-                y_max = raw_box.get('y_max') if raw_box.get('y_max') is not None else raw_box.get('ymax', raw_box.get('yMax'))
-
-                if all(v is not None for v in [x_min, y_min, x_max, y_max]):
-                    try:
-                        fx1, fy1, fx2, fy2 = float(x_min), float(y_min), float(x_max), float(y_max)
-                        if all(0.0 <= v <= 1.0 for v in [fx1, fy1, fx2, fy2]):
-                            fx1, fy1, fx2, fy2 = fx1 * 1000.0, fy1 * 1000.0, fx2 * 1000.0, fy2 * 1000.0
-                        norm_box = {
-                            'x_min': max(0, min(1000, int(round(min(fx1, fx2))))),
-                            'y_min': max(0, min(1000, int(round(min(fy1, fy2))))),
-                            'x_max': max(0, min(1000, int(round(max(fx1, fx2))))),
-                            'y_max': max(0, min(1000, int(round(max(fy1, fy2)))))
-                        }
-                    except (ValueError, TypeError):
-                        norm_box = None
+            norm_box = parse_and_normalize_bbox(raw_box)
 
             unc_reason = inst_item.get('uncertainty_reason') or inst_item.get('uncertaintyReason')
 
