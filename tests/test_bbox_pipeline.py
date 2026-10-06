@@ -293,6 +293,44 @@ class TestBoundingBoxPipeline(unittest.TestCase):
         self.assertFalse(validate_bbox_coords(float('nan'), 100.0, 200.0, 200.0))
         self.assertFalse(validate_bbox_coords(100.0, 100.0, float('inf'), 200.0))
 
+    def test_expanded_aliases_and_stemming(self):
+        """Verify expanded aliases and plural/stemming match correctly."""
+        self.assertTrue(labels_match("sunglasses", "glasses"))
+        self.assertTrue(labels_match("sunglass", "glasses"))
+        self.assertTrue(labels_match("computer keyboard", "keyboard"))
+        self.assertTrue(labels_match("laptop computer", "laptop"))
+        self.assertTrue(labels_match("notebook", "laptop"))
+        self.assertTrue(labels_match("headphones", "headphone"))
+        self.assertTrue(labels_match("earphones", "headphones"))
+        self.assertTrue(labels_match("smartwatch", "watch"))
+        self.assertTrue(labels_match("watches", "watch"))
+
+    @patch("services.vision.localize_objects")
+    def test_single_pair_skew_recovery(self, mock_localize):
+        """
+        Test that a single instance of a category recovers from initial coordinate skew
+        (e.g. laptop shifted horizontally by 280px) when localization returns the true box.
+        """
+        # Original shifted box (e.g. squished to center-left)
+        inst = ObjectInstance(
+            id="laptop_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=540.0, y_min=240.0, x_max=740.0, y_max=640.0)
+        )
+        cat = DetectedObjectCategory(name="laptop", confirmed_count=1, instances=[inst])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="Laptop on desk.")
+
+        # True localized box on the right
+        mock_localize.return_value = [
+            {"label": "laptop", "box": {'x_min': 700.0, 'y_min': 240.0, 'x_max': 980.0, 'y_max': 640.0}}
+        ]
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        refined_box = refined.objects[0].instances[0].bounding_box
+        # Should be refined to true coordinates
+        self.assertEqual(refined_box.x_min, 700.0)
+        self.assertEqual(refined_box.x_max, 980.0)
+
 
 if __name__ == "__main__":
     unittest.main()

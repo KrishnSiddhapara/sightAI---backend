@@ -46,23 +46,17 @@ STEP 3: INDEPENDENT PERSON-BY-PERSON & INSTANCE ATTRIBUTE EXTRACTION
 - If an attribute (e.g. exact clothing, pose, action, age, brand) is not clearly visible, return "not clearly visible" or "unknown". DO NOT guess!
 
 STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
-- For EVERY confidently identified physical object instance, provide bounding box coordinates in 'bounding_box': {"x_min": float, "y_min": float, "x_max": float, "y_max": float} in normalized 0 to 1000 scale:
-  * x_min = Leftmost horizontal edge of the object (0 = left image boundary, 1000 = right image boundary)
-  * y_min = Topmost vertical edge of the object (0 = top image boundary, 1000 = bottom image boundary)
-  * x_max = Rightmost horizontal edge of the object (0 to 1000, MUST be > x_min)
-  * y_max = Bottommost vertical edge of the object (0 to 1000, MUST be > y_min)
-- COORDINATE SYSTEM CALIBRATION: The 0-1000 coordinate space maps linearly across the FULL image rectangle. The user will tell you the exact pixel dimensions (W×H) in their request. Use that to calibrate your spatial awareness:
-  * An object at the exact center of the image = x_min~400, y_min~400, x_max~600, y_max~600
-  * An object in the top-left corner = x_min~0, y_min~0
-  * An object in the bottom-right corner = x_max~1000, y_max~1000
+- For EVERY confidently identified physical object instance, provide bounding box coordinates using 'box_2d': [ymin, xmin, ymax, xmax] normalized to 0 to 1000 scale:
+  * ymin = Topmost vertical edge of the object (0 = top image boundary, 1000 = bottom image boundary)
+  * xmin = Leftmost horizontal edge of the object (0 = left image boundary, 1000 = right image boundary)
+  * ymax = Bottommost vertical edge of the object (0 to 1000, MUST be > ymin)
+  * xmax = Rightmost horizontal edge of the object (0 to 1000, MUST be > xmin)
 - CRITICAL BOUNDING BOX ACCURACY RULES:
   1. TIGHT FIT: The bounding box MUST tightly surround ONLY the visible physical extent of that specific object instance. Do NOT include surrounding background, empty desk/table space, cords, wires, or shadows. Oversized boxes are WRONG.
-  2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure HORIZONTAL left-to-right position; y_min and y_max measure VERTICAL top-to-bottom position. NEVER swap or transpose X↔Y axes! If an object is horizontally left, its x_min should be low (~0-200). If it is vertically high, its y_min should be low (~0-200).
+  2. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
   3. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
-  4. SMALL & TABLETOP OBJECTS: For small items (figurines, pens, phones, cups, mice, watches), detect each individual piece and ensure the box is compact and tightly fitted. Do NOT place boxes on empty spaces, shadows, or cables.
-  5. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
-  6. OCCLUSION & BOUNDARIES: Enclose only the visible physical extent of the object. Do not invent bounding boxes for non-existent objects or areas outside the image frame.
-  7. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER return fake or estimated coordinates!
+  4. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
+  5. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'box_2d': null. NEVER return fake or estimated coordinates!
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
@@ -90,12 +84,7 @@ Return ONLY ONE valid raw JSON object matching this exact schema:
             "type_or_subtype": "unknown",
             "visible_details": "none noted"
           },
-          "bounding_box": {
-            "x_min": 100.0,
-            "y_min": 150.0,
-            "x_max": 300.0,
-            "y_max": 800.0
-          },
+          "box_2d": [150, 100, 800, 300],
           "uncertainty_reason": null
         }
       ]
@@ -143,14 +132,23 @@ SAFE_CATEGORY_ALIASES = {
     "vehicle": "car",
     "bicycle": "bike",
     "couch": "sofa",
-    "eyeglasses": "glasses",
-    "sunglasses": "glasses",
-    "spectacles": "glasses",
+    "eyeglasses": "glass",
+    "sunglasses": "glass",
+    "sunglass": "glass",
+    "glasses": "glass",
+    "spectacles": "glass",
     "computer mouse": "mouse",
+    "laptop computer": "laptop",
+    "notebook": "laptop",
+    "computer keyboard": "keyboard",
     "wristwatch": "watch",
     "smartwatch": "watch",
     "elephant figurine": "elephant",
     "elephant statue": "elephant",
+    "headphone": "headphones",
+    "earphone": "headphones",
+    "earphones": "headphones",
+    "headset": "headphones",
 }
 
 def normalize_label(label: str) -> str:
@@ -158,12 +156,21 @@ def normalize_label(label: str) -> str:
     if not label:
         return ""
     cleaned = re.sub(r'[^a-z0-9\s]', '', label.lower().strip())
+    if cleaned in SAFE_CATEGORY_ALIASES:
+        return SAFE_CATEGORY_ALIASES[cleaned]
+
     tokens = cleaned.split()
     normalized_tokens = []
     for t in tokens:
-        # Safe singularization for simple plural endings
-        if len(t) > 3 and t.endswith('s') and not t.endswith(('ss', 'us', 'is')):
-            normalized_tokens.append(t[:-1])
+        if t in SAFE_CATEGORY_ALIASES:
+            normalized_tokens.append(SAFE_CATEGORY_ALIASES[t])
+            continue
+        if len(t) > 4 and t.endswith(('sses', 'shes', 'ches', 'xes')):
+            stemmed = t[:-2]
+            normalized_tokens.append(SAFE_CATEGORY_ALIASES.get(stemmed, stemmed))
+        elif len(t) > 3 and t.endswith('s') and not t.endswith(('ss', 'us', 'is')):
+            stemmed = t[:-1]
+            normalized_tokens.append(SAFE_CATEGORY_ALIASES.get(stemmed, stemmed))
         else:
             normalized_tokens.append(t)
     base = " ".join(normalized_tokens)
@@ -389,13 +396,17 @@ def refine_bounding_boxes(
                 center_dist = calculate_center_distance(orig_b, cand_b)
 
                 # Consistency check:
-                # 1. Significant IoU overlap (>= 0.20), OR
-                # 2. Close center proximity (<= 200px) with at least minor overlap (IoU >= 0.05), OR
-                # 3. Very close center proximity (<= 120px)
+                # 1. Significant IoU overlap (>= 0.15), OR
+                # 2. Moderate center proximity (<= 250px) with at least minor overlap (IoU >= 0.03), OR
+                # 3. Close center proximity (<= 180px), OR
+                # 4. Single-instance category match: if only 1 instance and 1 candidate for this category,
+                #    allow center distance up to 450px to recover from severe initial coordinate skew.
+                single_pair = (len(boxed_instances) == 1 and len(candidate_indices) == 1)
                 is_consistent = (
-                    iou >= 0.20 or
-                    (center_dist <= 200.0 and iou >= 0.05) or
-                    (center_dist <= 120.0)
+                    iou >= 0.15 or
+                    (center_dist <= 250.0 and iou >= 0.03) or
+                    (center_dist <= 180.0) or
+                    (single_pair and center_dist <= 450.0)
                 )
 
                 if is_consistent:
@@ -509,12 +520,6 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
     if FALLBACK_VLM_MODEL and FALLBACK_VLM_MODEL not in models_to_try:
         models_to_try.append(FALLBACK_VLM_MODEL)
 
-    # Build dimension context string for user prompt
-    dimension_context = ""
-    if image_width > 0 and image_height > 0:
-        aspect = "landscape" if image_width > image_height else ("portrait" if image_height > image_width else "square")
-        dimension_context = f"\n\nIMAGE DIMENSIONS: This image is {image_width} × {image_height} pixels ({aspect}). Use this to calibrate your bounding box coordinate accuracy. The 0-1000 coordinate scale maps linearly across the full {image_width}px width (X axis) and {image_height}px height (Y axis)."
-
     last_exception = None
     t0 = time.perf_counter()
 
@@ -523,9 +528,9 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
             try:
                 # On retry after MAX_TOKENS, use a hyper-concise user prompt instruction
                 if attempt == 1:
-                    user_prompt = f"Perform strict visual verification, physical instance counting, independent attribute analysis, TIGHT bounding box localization, and scene classification on this image. Return bounding_box coordinates as dict {{x_min, y_min, x_max, y_max}} in 0-1000 scale. Each box MUST tightly fit the visible object — no extra padding, no background space. Verify x_min < x_max and y_min < y_max for every box.{dimension_context}"
+                    user_prompt = "Perform strict visual verification, physical instance counting, independent attribute analysis, TIGHT bounding box localization, and scene classification on this image. Provide 'box_2d': [ymin, xmin, ymax, xmax] normalized to 0-1000 for each detected object instance (ymin/ymax vertical, xmin/xmax horizontal). Each box MUST tightly fit the visible object."
                 else:
-                    user_prompt = f"CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, limit object categories to top 10 most prominent items, and keep scene summary under 15 words. Do NOT list trivial background micro-objects or write prose descriptions inside attributes.{dimension_context}"
+                    user_prompt = "CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, limit object categories to top 10 most prominent items, and keep scene summary under 15 words. Provide 'box_2d': [ymin, xmin, ymax, xmax] normalized to 0-1000 for instances."
 
                 logger.info(
                     f"[VLM_CONFIG] model='{model_name}' | attempt={attempt}/2 | max_output_tokens={MAX_OUTPUT_TOKENS} | "
