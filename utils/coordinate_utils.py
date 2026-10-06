@@ -140,3 +140,54 @@ def compute_image_transformation_metadata(
         "rotation": 0,
         "crop": None
     }
+
+def calculate_iou(box1: Dict[str, float], box2: Dict[str, float]) -> float:
+    """
+    Calculates Intersection over Union (IoU) ratio between two 0-1000 scale bounding boxes.
+    """
+    if not box1 or not box2:
+        return 0.0
+
+    x_left = max(box1['x_min'], box2['x_min'])
+    y_top = max(box1['y_min'], box2['y_min'])
+    x_right = min(box1['x_max'], box2['x_max'])
+    y_bottom = min(box1['y_max'], box2['y_max'])
+
+    if x_right <= x_left or y_bottom <= y_top:
+        return 0.0
+
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    box1_area = (box1['x_max'] - box1['x_min']) * (box1['y_max'] - box1['y_min'])
+    box2_area = (box2['x_max'] - box2['x_min']) * (box2['y_max'] - box2['y_min'])
+
+    union_area = box1_area + box2_area - intersection_area
+    if union_area <= 0:
+        return 0.0
+
+    return intersection_area / union_area
+
+def calculate_containment(box1: Dict[str, float], box2: Dict[str, float]) -> float:
+    """
+    Calculates containment ratio (intersection area over smaller box area) between two 0-1000 scale bounding boxes.
+    """
+    if not box1 or not box2:
+        return 0.0
+
+    x_left = max(box1['x_min'], box2['x_min'])
+    y_top = max(box1['y_min'], box2['y_min'])
+    x_right = min(box1['x_max'], box2['x_max'])
+    y_bottom = min(box1['y_max'], box2['y_max'])
+
+    if x_right <= x_left or y_bottom <= y_top:
+        return 0.0
+
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    box1_area = (box1['x_max'] - box1['x_min']) * (box1['y_max'] - box1['y_min'])
+    box2_area = (box2['x_max'] - box2['x_min']) * (box2['y_max'] - box2['y_min'])
+    min_area = min(box1_area, box2_area)
+
+    if min_area <= 0:
+        return 0.0
+
+    return intersection_area / min_area
+

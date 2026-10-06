@@ -29,19 +29,20 @@ STEP 1: FULL IMAGE SCAN & ENTITY DETECTION
 - Distinguish between real physical objects in the 3D scene vs reflections in mirrors/glass, shadows on surfaces, or pictures shown inside posters/TV screens/paintings.
 - DO NOT count reflections, shadows, or images shown inside screens/posters/photos as real physical objects.
 - OBJECT CATEGORY CONTROL: Detect up to a maximum of 15 primary, clearly visible physical object categories. Do NOT produce an endless list of trivial background micro-objects (such as individual leaves, tiny pebbles, or distant background specks).
+- OBJECT & FIGURINE RECOGNITION: Accurately identify specific decorative items, figurines, statuettes, and sculptures (e.g. 'elephant figurine', 'animal statue', 'plant', 'computer mouse', 'smartwatch', 'towel') by their actual visually observable shape and characteristics. Do NOT use lazy generic names (such as 'round object', 'thing', or 'item') when the object has a distinct form like an elephant figurine or carved statue.
 
 STEP 2: PHYSICAL INSTANCE COUNTING & DEDUPLICATION
 - Count distinct physical instances.
-- DO NOT double-count an object under different names (e.g. if an item is a 'car', do NOT list it as 'car' and also as 'vehicle' or 'automobile').
-- Standardize object category names to simple lowercase terms (e.g. 'person', 'car', 'dog', 'chair', 'bottle', 'bicycle', 'phone', 'pen', 'cup').
+- DO NOT double-count an object under different names (e.g. if an item is an 'elephant figurine', do NOT list it as 'elephant figurine' AND also as 'round object' or 'candle').
+- Standardize object category names to simple lowercase terms (e.g. 'person', 'car', 'dog', 'chair', 'bottle', 'bicycle', 'phone', 'elephant figurine', 'computer mouse', 'plant', 'towel').
 - For overlapping or partially hidden objects:
   * Count ONLY clearly distinguishable physical instances under 'confirmed_count'.
   * If an object is partially visible but cannot be confirmed, increment 'uncertain_count' and explain the reason in 'uncertainty_reason'. Do NOT guess or pad the confirmed count.
 
 STEP 3: INDEPENDENT PERSON-BY-PERSON & INSTANCE ATTRIBUTE EXTRACTION
-- EVERY person instance (person_1, person_2, person_3, etc.) MUST be analyzed independently based strictly on their visible spatial region.
-- NEVER create a generic description and copy it to multiple people.
-- ATTRIBUTES MUST BE CONCISE 1-4 WORD PHRASES (e.g. clothing='red t-shirt and jeans', pose='standing', action='waving'). NEVER write long prose, paragraphs, explanations, or commentary inside attribute fields!
+- EVERY person or object instance (person_1, elephant figurine_1, mouse_1, etc.) MUST be analyzed independently based strictly on their visible spatial region.
+- NEVER create a generic description and copy it to multiple instances.
+- ATTRIBUTES MUST BE CONCISE 1-4 WORD PHRASES (e.g. clothing='red t-shirt and jeans', pose='standing', action='waving', object_color='white marble'). NEVER write long prose, paragraphs, explanations, or commentary inside attribute fields!
 - If an attribute (e.g. exact clothing, pose, action, age, brand) is not clearly visible, return "not clearly visible" or "unknown". DO NOT guess!
 
 STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
@@ -51,11 +52,11 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
   * x_max = Rightmost horizontal edge of the object (0 to 1000, MUST be > x_min)
   * y_max = Bottommost vertical edge of the object (0 to 1000, MUST be > y_min)
 - CRITICAL BOUNDING BOX ACCURACY RULES:
-  1. TIGHT FIT: The bounding box MUST tightly surround the visible physical extent of that specific object. Do NOT include unnecessary surrounding background space, and avoid oversized boxes.
-  2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure horizontal left-to-right position; y_min and y_max measure vertical top-to-bottom position.
-  3. INDEPENDENT INSTANCES: Each physical instance (e.g., person_1, person_2, bottle_1, bottle_2) MUST have its own separate, independently calculated bounding box. NEVER copy, duplicate, or mirror bounding box coordinates across different objects.
-  4. SMALL OBJECTS: For small items (e.g. pens, phones, cups, bottles, remotes, computer mice, small electronics), detect them carefully and ensure the box is compact and tightly fitted to the visible object bounds. Do not omit small objects simply because they are small.
-  5. OVERLAPPING OBJECTS: For overlapping objects (e.g., multiple people sitting together, items on a table), preserve separate, distinct bounding boxes for each physical instance.
+  1. TIGHT FIT: The bounding box MUST tightly surround the visible physical extent of that specific object. Do NOT include unnecessary surrounding background space, empty desk space, wires, or shadows. Avoid oversized or misplaced boxes.
+  2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure horizontal left-to-right position; y_min and y_max measure vertical top-to-bottom position. Double-check that horizontal X and vertical Y coordinates are NOT transposed or swapped!
+  3. INDEPENDENT INSTANCES: Each physical instance (e.g., elephant figurine_1, elephant figurine_2, mouse_1) MUST have its own separate, independently calculated bounding box enclosing that exact physical item. NEVER copy, duplicate, or mirror bounding box coordinates across different objects.
+  4. SMALL & TABLETOP OBJECTS: For small items (e.g. elephant figurines, pens, phones, cups, bottles, computer mice, small electronics), detect each individual piece carefully and ensure the box is compact and tightly fitted around the actual item bounds. Do not place boxes on empty spaces or mouse tails.
+  5. OVERLAPPING OBJECTS & UNIQUE LOCALIZATION: For nearby or overlapping objects, ensure each box accurately tracks its own item. Do not generate multiple overlapping boxes for the exact same physical item under different category names.
   6. OCCLUSION & BOUNDARIES: Enclose only the visible physical extent of the object. Do not invent bounding boxes for non-existent objects or areas outside the image frame.
   7. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER return fake or estimated coordinates!
 
@@ -111,15 +112,23 @@ CRITICAL RULES:
 - Return a complete and valid JSON object.
 """
 
-from utils.coordinate_utils import sanitize_box
+from utils.coordinate_utils import sanitize_box, calculate_iou, calculate_containment
+
+GENERIC_OBJECT_NAMES = {"round object", "object", "thing", "item", "shape", "blob", "miscellaneous", "unknown"}
 
 def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
     """
-    Validates and sanitizes bounding boxes across all object instances.
-    Auto-repairs inverted coordinates (x_min > x_max or y_min > y_max) using min/max,
-    ensures boundaries are within [0, 1000], and discards boxes with zero/tiny area (< 2 units in 1000 scale).
+    Validates, sanitizes, and deduplicates bounding boxes across all object instances.
+    1. Auto-repairs inverted coordinates (x_min > x_max or y_min > y_max), clamps to [0, 1000],
+       and discards tiny area boxes (< 5 units in 1000 scale).
+    2. Performs IoU Non-Maximum Suppression (NMS) and containment deduplication to eliminate
+       hallucinated, overlapping duplicate boxes covering the exact same physical space.
     """
+    all_instances = []
+
+    # Step 1: Sanitize individual boxes
     for category in result.objects:
+        cat_name = category.name.strip().lower()
         for instance in category.instances:
             bbox = instance.bounding_box
             if bbox is not None:
@@ -129,10 +138,57 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
                     bbox.y_min = sanitized['y_min']
                     bbox.x_max = sanitized['x_max']
                     bbox.y_max = sanitized['y_max']
+                    all_instances.append((cat_name, instance, {
+                        'x_min': bbox.x_min,
+                        'y_min': bbox.y_min,
+                        'x_max': bbox.x_max,
+                        'y_max': bbox.y_max
+                    }))
                 else:
                     logger.warning(f"Discarding tiny/zero-area bounding box for instance {instance.id}")
                     instance.bounding_box = None
+
+    # Step 2: Overlap deduplication (IoU & Containment NMS)
+    n = len(all_instances)
+    discard_indices = set()
+
+    for i in range(n):
+        if i in discard_indices:
+            continue
+        cat_i, inst_i, box_i = all_instances[i]
+
+        for j in range(i + 1, n):
+            if j in discard_indices:
+                continue
+            cat_j, inst_j, box_j = all_instances[j]
+
+            iou = calculate_iou(box_i, box_j)
+            containment = calculate_containment(box_i, box_j)
+
+            # If two boxes cover virtually the same area (IoU >= 0.45 or containment >= 0.70)
+            if iou >= 0.45 or containment >= 0.70:
+                is_i_generic = cat_i in GENERIC_OBJECT_NAMES
+                is_j_generic = cat_j in GENERIC_OBJECT_NAMES
+
+                if is_i_generic and not is_j_generic:
+                    discard_indices.add(i)
+                    logger.info(f"Deduplicating box: Discarding generic '{cat_i}' instance '{inst_i.id}' in favor of specific '{cat_j}' instance '{inst_j.id}' (IoU={iou:.2f})")
+                    break
+                elif is_j_generic and not is_i_generic:
+                    discard_indices.add(j)
+                    logger.info(f"Deduplicating box: Discarding generic '{cat_j}' instance '{inst_j.id}' in favor of specific '{cat_i}' instance '{inst_i.id}' (IoU={iou:.2f})")
+                else:
+                    # Same category or equal specificity: keep earlier instance and discard duplicate
+                    discard_indices.add(j)
+                    logger.info(f"Deduplicating duplicate box: Discarding instance '{inst_j.id}' ('{cat_j}') duplicate of '{inst_i.id}' ('{cat_i}') (IoU={iou:.2f})")
+
+    # Apply discards
+    for idx in discard_indices:
+        _, inst_to_discard, _ = all_instances[idx]
+        inst_to_discard.bounding_box = None
+
     return result
+
 
 def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) -> GroundedAnalysisResult:
     """

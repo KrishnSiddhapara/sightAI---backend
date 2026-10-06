@@ -198,7 +198,7 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
         inst_inverted = ObjectInstance(
             id="item_2",
             attributes=InstanceAttributes(),
-            bounding_box=BoundingBox(x_min=200, y_min=50, x_max=50, y_max=300)
+            bounding_box=BoundingBox(x_min=500, y_min=50, x_max=300, y_max=300)
         )
         inst_zero_area = ObjectInstance(
             id="item_3",
@@ -213,10 +213,38 @@ class TestVisualAccuracyAndGrounding(unittest.TestCase):
         sanitized = sanitize_bounding_boxes(res)
         self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
         # Verify auto-repair of inverted x_min and x_max
-        self.assertEqual(sanitized.objects[0].instances[1].bounding_box.x_min, 50)
-        self.assertEqual(sanitized.objects[0].instances[1].bounding_box.x_max, 200)
+        self.assertEqual(sanitized.objects[0].instances[1].bounding_box.x_min, 300)
+        self.assertEqual(sanitized.objects[0].instances[1].bounding_box.x_max, 500)
         # Verify zero-area box (< 5 units) is discarded
         self.assertIsNone(sanitized.objects[0].instances[2].bounding_box)
+
+    def test_bounding_box_nms_deduplication(self):
+        """Verify IoU NMS discards overlapping duplicate boxes and prioritizes specific object categories over generic ones."""
+        from services.vision import sanitize_bounding_boxes
+        from services.schemas import BoundingBox
+
+        inst_elephant = ObjectInstance(
+            id="elephant_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=100, y_min=100, x_max=300, y_max=300)
+        )
+        inst_generic_round = ObjectInstance(
+            id="round_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=105, y_min=105, x_max=295, y_max=295)
+        )
+
+        cat1 = DetectedObjectCategory(name="elephant figurine", confirmed_count=1, instances=[inst_elephant])
+        cat2 = DetectedObjectCategory(name="round object", confirmed_count=1, instances=[inst_generic_round])
+        scene = SceneDescription(environment="Room", primary_activity="Testing", summary="Test")
+        res = GroundedAnalysisResult(objects=[cat1, cat2], scene=scene, overall_summary="Test")
+
+        sanitized = sanitize_bounding_boxes(res)
+        # Specific 'elephant figurine' box should be kept
+        self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
+        # Generic 'round object' box overlapping >90% with elephant figurine should be discarded by NMS
+        self.assertIsNone(sanitized.objects[1].instances[0].bounding_box)
+
 
     def test_image_preprocessing_rgb_and_hash(self):
         """Verify image validation handles RGB mode and computes distinct hashes for state invalidation."""
