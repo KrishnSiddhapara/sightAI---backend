@@ -52,6 +52,7 @@ class ObjectInstance(BaseModel):
     attributes: InstanceAttributes = Field(default_factory=InstanceAttributes, description="Independent attributes strictly belonging to this single visual instance.")
     box_2d: Optional[List[int]] = Field(default=None, description="Normalized 0-1000 bounding box coordinates [ymin, xmin, ymax, xmax] (Y FIRST, X SECOND). Top-left is [0, 0], bottom-right is [1000, 1000].")
     bounding_box: Optional[BoundingBox] = Field(default=None, description="Normalized 0-1000 bounding box coordinates [x_min, y_min, x_max, y_max] surrounding this specific instance. Return null if localization is uncertain.")
+    localization_status: Optional[str] = Field(default="ok", description="Status of localization: 'ok' if tight box detected, 'missing' if unlocalized.")
     uncertainty_reason: Optional[str] = Field(default=None, description="Explicit reason if identification or count of this instance is uncertain (e.g. 'Partially occluded behind tree').")
 
 class DetectedObjectCategory(BaseModel):

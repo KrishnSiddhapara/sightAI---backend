@@ -13,7 +13,12 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from services.schemas import GroundedAnalysisResult
-from utils.config import MAX_OUTPUT_TOKENS, PRIMARY_VLM_MODEL, FALLBACK_VLM_MODEL, ANALYSIS_TIMEOUT
+from utils.config import (
+    MAX_OUTPUT_TOKENS, PRIMARY_VLM_MODEL, FALLBACK_VLM_MODEL, ANALYSIS_TIMEOUT,
+    BBOX_REFINE_ENABLED, BBOX_DETECTION_MODEL, BBOX_THINKING_BUDGET,
+    BBOX_USE_STRICT_SCHEMA, BBOX_TARGETED_REDETECT, BBOX_CROP_REFINEMENT,
+    LOCALIZATION_TIMEOUT
+)
 from utils.json_utils import clean_json_text, normalize_grounded_analysis, format_pydantic_validation_error
 from utils.image_validation import encode_vlm_image_part
 
@@ -337,7 +342,7 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
         for instance in category.instances:
             bbox = instance.bounding_box
             if bbox is not None:
-                sanitized = sanitize_box(bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max, min_size_px_in_1000=2.0)
+                sanitized = sanitize_box(bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max, min_size_px_in_1000=5.0)
                 if sanitized:
                     bbox.x_min = sanitized['x_min']
                     bbox.y_min = sanitized['y_min']
@@ -378,68 +383,51 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
             same_category = (cat_i == cat_j)
 
             # Rule A: Same or alias categories deduplication
-            # Relaxed NMS IoU threshold (>= 0.45) to prevent merging closely packed distinct objects
+            # High IoU (>= 0.60) or near-coincident centers with IoU >= 0.40
             if (same_category or is_alias_match) and (
-                iou >= 0.45 or containment >= 0.70 or (center_dist <= 30.0 and iou >= 0.25)
+                iou >= 0.60 or (center_dist <= 25.0 and iou >= 0.40)
             ):
                 loser = j if area_i >= area_j else i
                 discard_indices.add(loser)
-                logger.info(f"Dedup: dropping duplicate between '{inst_i.id}' and '{inst_j.id}' (IoU={iou:.2f}, containment={containment:.2f}, center_dist={center_dist:.1f})")
+                logger.info(f"Dedup: dropping same-category duplicate between '{inst_i.id}' and '{inst_j.id}' (IoU={iou:.2f}, center_dist={center_dist:.1f})")
                 if loser == i:
                     break
 
-            # Rule B: One is a generic name / sub-part and significantly overlaps (IoU >= 0.30 or containment >= 0.50)
-            elif (is_i_generic != is_j_generic) and (iou >= 0.30 or containment >= 0.50):
+            # Rule B: One is a generic label / sub-part and significantly overlaps (IoU >= 0.50 or heavy containment in non-surface parent)
+            elif (is_i_generic != is_j_generic):
                 loser = i if is_i_generic else j
-                discard_indices.add(loser)
-                logger.info(f"Dedup: dropping generic box '{all_instances[loser][1].id}' in favor of specific item (IoU={iou:.2f})")
-                if loser == i:
-                    break
+                is_loser_subpart = (all_instances[loser][0] in SUBPART_OBJECT_NAMES) or (all_instances[loser][0] in GENERIC_OBJECT_NAMES)
+                winner_cat = all_instances[j if loser == i else i][0]
+                is_winner_non_surface = winner_cat not in SURFACE_OBJECT_NAMES
 
-            # Rule C: Heavy nested containment (containment >= 0.75) where one box is a small sub-part of another (area ratio < 0.35)
-            # ONLY suppresses if the smaller object is an actual sub-part (coil, cord, wire) or generic name,
-            # and the larger object is NOT a surface/cloth (objects sit on towels/tables, they are not sub-parts of towels!)
-            smaller_cat = cat_j if area_j < area_i else cat_i
-            larger_cat = cat_i if area_j < area_i else cat_j
-            is_smaller_subpart = (smaller_cat in SUBPART_OBJECT_NAMES) or (smaller_cat in GENERIC_OBJECT_NAMES)
-            is_larger_surface = (larger_cat in SURFACE_OBJECT_NAMES)
-            area_ratio = (min(area_i, area_j) / max(area_i, area_j)) if max(area_i, area_j) > 0 else 0
+                if iou >= 0.50 or (is_loser_subpart and is_winner_non_surface and containment >= 0.70):
+                    discard_indices.add(loser)
+                    logger.info(f"Dedup: dropping generic/subpart box '{all_instances[loser][1].id}' in favor of '{all_instances[j if loser==i else i][1].id}' (IoU={iou:.2f}, containment={containment:.2f})")
+                    if loser == i:
+                        break
 
-            if is_smaller_subpart and not is_larger_surface and containment >= 0.70 and area_ratio < 0.35:
-                loser = j if area_j < area_i else i
-                discard_indices.add(loser)
-                logger.info(f"Dedup: dropping small nested sub-part '{all_instances[loser][1].id}' (containment={containment:.2f})")
-                if loser == i:
-                    break
-
-            # Rule D: Cross-Category Physical Exclusion
-            # Two distinct solid tabletop objects (e.g. candle vs elephant figurine) cannot occupy the same 3D space.
-            # Applies ONLY when:
-            # 1. Categories are DIFFERENT and NOT aliases.
-            # 2. NEITHER category is a supporting surface (e.g. towel, mat, tray, table - objects sit on surfaces!).
-            # 3. High mutual footprint overlap (IoU >= 0.45 to prevent dropping closely packed distinct objects).
+            # Rule C: Cross-Category Identical Duplicate (two different categories on the EXACT same physical item, IoU >= 0.75)
+            # NEVER applies if either category is a supporting surface (e.g. towel, mat, table - objects sit on surfaces!)
             elif (
                 not same_category
                 and not is_alias_match
-                and (cat_i not in SURFACE_OBJECT_NAMES and cat_j not in SURFACE_OBJECT_NAMES)
-                and (iou >= 0.45 or (containment >= 0.70 and area_ratio >= 0.45))
+                and cat_i not in SURFACE_OBJECT_NAMES
+                and cat_j not in SURFACE_OBJECT_NAMES
+                and iou >= 0.75
             ):
                 count_i = sum(1 for c, _, _ in all_instances if c == cat_i)
                 count_j = sum(1 for c, _, _ in all_instances if c == cat_j)
-
                 if is_i_generic != is_j_generic:
                     loser = i if is_i_generic else j
                 elif count_i != count_j:
-                    # The multi-instance category (e.g. 5 elephant figurines) has a spurious extra box on the unique item (e.g. 1 candle)
                     loser = i if count_i > count_j else j
                 else:
                     loser = i if area_i > area_j else j
-
                 discard_indices.add(loser)
                 logger.info(
-                    f"Dedup: dropping cross-category collision '{all_instances[loser][1].id}' ({all_instances[loser][0]}) "
+                    f"Dedup: dropping duplicate cross-category label '{all_instances[loser][1].id}' ({all_instances[loser][0]}) "
                     f"colliding with '{all_instances[j if loser==i else i][1].id}' ({all_instances[j if loser==i else i][0]}) "
-                    f"(IoU={iou:.2f}, containment={containment:.2f})"
+                    f"(IoU={iou:.2f})"
                 )
                 if loser == i:
                     break
@@ -448,6 +436,7 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
     for idx in discard_indices:
         _, inst_to_discard, _ = all_instances[idx]
         inst_to_discard.bounding_box = None
+        inst_to_discard.localization_status = "missing"
 
     # Step 3: Adjacent Box Boundary Separation (minor border bleeds only)
     active_instances = [all_instances[i] for i in range(n) if i not in discard_indices]
@@ -461,7 +450,7 @@ def reconcile_unboxed_instances(result: GroundedAnalysisResult) -> GroundedAnaly
     Ensures consistency across detected objects and instances:
     1. Verifies that confirmed_count accurately reflects detected instances.
     2. If confirmed_count is missing or smaller than boxed instances, synchronizes it.
-    3. Preserves all instance attributes and coordinates.
+    3. Sets localization_status ('ok' or 'missing') on each instance.
     """
     for cat in result.objects:
         boxed_count = sum(1 for inst in cat.instances if inst.bounding_box is not None)
@@ -470,28 +459,38 @@ def reconcile_unboxed_instances(result: GroundedAnalysisResult) -> GroundedAnaly
         elif not cat.confirmed_count and cat.instances:
             cat.confirmed_count = len(cat.instances)
 
+        for inst in cat.instances:
+            if inst.bounding_box is not None:
+                inst.localization_status = "ok"
+            else:
+                inst.localization_status = "missing"
+                if not inst.uncertainty_reason:
+                    inst.uncertainty_reason = "Object confirmed visually; tight bounding box could not be localized."
+
     return result
 
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # DEDICATED LOCALIZATION PASS
 # ---------------------------------------------------------------------------
 
 class LocalizedBox(BaseModel):
-    label: str = Field(description="Object category label, exactly one of the requested categories.")
-    box_2d: List[int] = Field(description="[ymin, xmin, ymax, xmax] normalized to 0-1000 (Y FIRST).")
+    label: str = Field(description="Object category label.")
+    box_2d: List[int] = Field(description="[ymin, xmin, ymax, xmax] normalized to 0-1000 (Y FIRST, X SECOND).")
 
-LOCALIZATION_TIMEOUT = 30.0
+class DetectionEnvelope(BaseModel):
+    detections: List[LocalizedBox] = Field(default_factory=list, description="List of localized physical objects.")
+
 
 def localize_objects(
     image_part: types.Part,
     api_key: str,
     categories: List[Tuple[str, int]],
-    model_name: str
+    model_name: str = BBOX_DETECTION_MODEL
 ) -> List[dict]:
     """
     Focused localization pass returning candidate detections with canonical coordinates.
-    Gemini native box_2d is [ymin, xmin, ymax, xmax] (0-1000 grid).
-    Converted explicitly to canonical {'x_min','y_min','x_max','y_max'}.
+    Uses Google's recommended 0-1000 [ymin, xmin, ymax, xmax] pattern inside a DetectionEnvelope.
     """
     client = genai.Client(
         api_key=api_key,
@@ -499,9 +498,8 @@ def localize_objects(
     )
     wanted = ", ".join(f"{name} (about {cnt})" for name, cnt in categories)
     prompt = (
-        f"Detect every visible physical instance of these objects: {wanted}.\n"
-        "Return a JSON list. Each item: {\"label\": <one of the requested names>, "
-        "\"box_2d\": [ymin, xmin, ymax, xmax]} with coordinates normalized to 0-1000.\n"
+        f"Detect every visible physical instance of these objects in the scene: {wanted}.\n"
+        "Return a JSON object with 'detections': list of objects, each with 'label' and 'box_2d' [ymin, xmin, ymax, xmax] (0-1000 scale, Y FIRST, X SECOND).\n"
         "CRITICAL BOUNDING BOX RULES:\n"
         "1. TIGHT VISUAL FIT: Box MUST hug the outermost visible physical pixels of the object. Zero extra padding, zero desk/background space, zero shadows.\n"
         "2. NO ADJACENT OVERLAPPING: When two objects sit next to each other, their bounding boxes MUST NOT overlap or bleed into each other. Stop at the exact boundary separating them.\n"
@@ -509,19 +507,23 @@ def localize_objects(
     )
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
-        response_schema=List[LocalizedBox],
+        response_schema=DetectionEnvelope,
         temperature=0.0,
         max_output_tokens=MAX_OUTPUT_TOKENS,
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=types.ThinkingConfig(thinking_budget=BBOX_THINKING_BUDGET),
     )
     response = client.models.generate_content(model=model_name, contents=[image_part, prompt], config=config)
     raw = response.text if response and getattr(response, "text", None) else ""
-    data = json.loads(clean_json_text(raw)) if raw else []
+    data = json.loads(clean_json_text(raw)) if raw else {}
     if isinstance(data, dict):
-        data = data.get("objects") or data.get("detections") or []
+        raw_items = data.get("detections") or data.get("objects") or []
+    elif isinstance(data, list):
+        raw_items = data
+    else:
+        raw_items = []
 
     out = []
-    for item in data:
+    for item in raw_items:
         if not isinstance(item, dict):
             continue
         raw_box_2d = item.get("box_2d") or item.get("box2d")
@@ -530,6 +532,51 @@ def localize_objects(
         if box and label and validate_bbox_coords(box['x_min'], box['y_min'], box['x_max'], box['y_max']):
             out.append({"label": label, "box": box})
     return out
+
+
+def redetect_category(
+    image_part: types.Part,
+    api_key: str,
+    cat_name: str,
+    expected_count: int,
+    model_name: str = BBOX_DETECTION_MODEL
+) -> List[dict]:
+    """
+    Targeted re-detection for a specific category when main localization missed instances.
+    """
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(LOCALIZATION_TIMEOUT * 1000))
+    )
+    prompt = (
+        f"Find and localize all {expected_count} visible physical instances of '{cat_name}' in this image.\n"
+        "Return a JSON object with 'detections': list of objects with 'label' and 'box_2d': [ymin, xmin, ymax, xmax] (0-1000 scale).\n"
+        "Provide tight bounding boxes around every visible instance."
+    )
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=DetectionEnvelope,
+        temperature=0.0,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    try:
+        response = client.models.generate_content(model=model_name, contents=[image_part, prompt], config=config)
+        raw = response.text if response and getattr(response, "text", None) else ""
+        data = json.loads(clean_json_text(raw)) if raw else {}
+        raw_items = data.get("detections") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        out = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            box = parse_gemini_box_2d(item.get("box_2d") or item.get("box2d"))
+            if box and validate_bbox_coords(box['x_min'], box['y_min'], box['x_max'], box['y_max']):
+                out.append({"label": cat_name, "box": box})
+        return out
+    except Exception as e:
+        logger.warning(f"[REDETECT_FAILED] Targeted re-detection for '{cat_name}' failed: {e}")
+        return []
+
 
 def refine_bounding_boxes(
     result: GroundedAnalysisResult,
@@ -541,25 +588,39 @@ def refine_bounding_boxes(
     Refines bounding boxes from the main analysis using candidate boxes from the dedicated localization pass.
     
     Robust Architecture:
-    1. Localization is a REFINEMENT mechanism, NEVER the sole source of truth.
+    1. Respects BBOX_REFINE_ENABLED kill switch.
     2. Objects are matched GEOMETRICALLY (IoU + Center Distance) within the same category.
     3. Consistency check: Candidate is accepted only if geometrically consistent with the original instance.
     4. FALLBACK RULE: Never delete a valid original box because refinement failed or returned fewer boxes!
+    5. Sets localization_status ('ok' | 'missing') on each instance.
     """
+    if not BBOX_REFINE_ENABLED:
+        logger.info("[BBOX] BBOX_REFINE_ENABLED is False; skipping dedicated localization pass.")
+        for cat in result.objects:
+            for inst in cat.instances:
+                inst.localization_status = "ok" if inst.bounding_box is not None else "missing"
+        return result
+
     categories = [(c.name.strip().lower(), max(len(c.instances), c.confirmed_count)) for c in result.objects if c.instances]
     if not categories:
         return result
 
     try:
         t0 = time.perf_counter()
-        detections = localize_objects(image_part, api_key, categories, model_name)
+        detections = localize_objects(image_part, api_key, categories, model_name=BBOX_DETECTION_MODEL)
         logger.info(f"[LOCALIZE] Retrieved {len(detections)} candidate boxes in {time.perf_counter() - t0:.2f}s")
     except Exception as e:
         logger.warning(f"[LOCALIZE_FAILED] Keeping original analysis boxes due to exception: {e}")
+        for cat in result.objects:
+            for inst in cat.instances:
+                inst.localization_status = "ok" if inst.bounding_box is not None else "missing"
         return result
 
     if not detections:
         logger.info("[LOCALIZE] No candidate detections returned; preserving all original boxes.")
+        for cat in result.objects:
+            for inst in cat.instances:
+                inst.localization_status = "ok" if inst.bounding_box is not None else "missing"
         return result
 
     # Conservative deduplication among candidate detections (only drop near-identical IoU >= 0.85)
@@ -580,9 +641,16 @@ def refine_bounding_boxes(
             if i not in used_detection_indices and labels_match(d["label"], cat_name)
         ]
 
-        if not candidate_indices:
-            logger.info(f"[BBOX] No localization candidates for category='{cat_name}'; keeping original boxes.")
-            continue
+        # Targeted re-detection if verified instances lack candidate detections
+        total_inst_count = len(cat.instances)
+        if BBOX_TARGETED_REDETECT and len(candidate_indices) < total_inst_count and total_inst_count > 0:
+            logger.info(f"[BBOX_REDETECT] Running targeted re-detection for '{cat_name}' (expected: {total_inst_count}, candidates: {len(candidate_indices)})")
+            redetected = redetect_category(image_part, api_key, cat_name, total_inst_count)
+            for rd in redetected:
+                if not any(calculate_iou(rd["box"], k["box"]) >= 0.85 for k in kept_detections):
+                    new_idx = len(kept_detections)
+                    kept_detections.append(rd)
+                    candidate_indices.append(new_idx)
 
         # Separate instances with existing valid boxes vs unboxed instances
         boxed_instances = []
@@ -603,7 +671,6 @@ def refine_bounding_boxes(
                 unboxed_instances.append((inst_idx, inst))
 
         # Geometric matching for boxed instances (IoU + Center distance)
-        # Compute match scores for all (instance, candidate) pairs
         match_candidates = []
         for b_idx, (orig_pos, inst, orig_b) in enumerate(boxed_instances):
             for c_idx in candidate_indices:
@@ -611,13 +678,7 @@ def refine_bounding_boxes(
                 iou = calculate_iou(orig_b, cand_b)
                 center_dist = calculate_center_distance(orig_b, cand_b)
 
-                # Strict geometric consistency check:
-                # Refinement candidate MUST be anchored to the original detected object:
-                # 1. Clear geometric overlap: iou >= 0.15, OR
-                # 2. Moderate overlap with close center: iou >= 0.05 and center_dist <= 150.0, OR
-                # 3. Very close center proximity: center_dist <= 60.0 (where even tiny items coincide), OR
-                # 4. Single-pair with minor overlap: single_pair and iou >= 0.03 and center_dist <= 250.0.
-                # A candidate with 0 IoU and center_dist > 60px is REJECTED to prevent moving boxes to empty space!
+                # Consistency check: Candidate is accepted if anchored to the object
                 single_pair = (len(boxed_instances) == 1 and len(candidate_indices) == 1)
                 is_consistent = (
                     iou >= 0.15 or
@@ -627,7 +688,6 @@ def refine_bounding_boxes(
                 )
 
                 if is_consistent:
-                    # Match score: prioritize higher IoU and closer center distance
                     score = (iou * 1000.0) - center_dist
                     match_candidates.append({
                         'b_idx': b_idx,
@@ -641,7 +701,6 @@ def refine_bounding_boxes(
                         'cand_b': cand_b
                     })
 
-        # Sort candidate matches by score descending
         match_candidates.sort(key=lambda m: m['score'], reverse=True)
 
         assigned_boxed = set()
@@ -653,7 +712,6 @@ def refine_bounding_boxes(
             if b_idx in assigned_boxed or c_idx in assigned_candidates:
                 continue
 
-            # Accept refinement!
             assigned_boxed.add(b_idx)
             assigned_candidates.add(c_idx)
             used_detection_indices.add(c_idx)
@@ -661,6 +719,7 @@ def refine_bounding_boxes(
             inst = match['inst']
             cand_b = match['cand_b']
             inst.bounding_box = BoundingBox(**cand_b)
+            inst.localization_status = "ok"
 
             logger.info(
                 f"[BBOX] category={cat_name} id={inst.id} "
@@ -669,60 +728,30 @@ def refine_bounding_boxes(
                 f"IoU={match['iou']:.3f} center_distance={match['center_dist']:.1f} decision=ACCEPT"
             )
 
-        # Log preservation of unmatched original boxes
         for b_idx, (orig_pos, inst, orig_b) in enumerate(boxed_instances):
             if b_idx not in assigned_boxed:
+                inst.localization_status = "ok"
                 logger.info(
                     f"[BBOX] category={cat_name} id={inst.id} "
                     f"original=[{orig_b['x_min']},{orig_b['y_min']},{orig_b['x_max']},{orig_b['y_max']}] "
                     f"decision=KEEP_ORIGINAL (no consistent candidate or candidate claimed by closer instance)"
                 )
 
-        # For unboxed instances (originally None), assign remaining unused candidates if available
-        # BUT ONLY if candidate does NOT collide with an already assigned box in the scene
+        # For unboxed instances, assign remaining candidates
         remaining_candidates = [c for c in candidate_indices if c not in assigned_candidates and c not in used_detection_indices]
         for (u_pos, inst) in unboxed_instances:
-            while remaining_candidates:
+            if remaining_candidates:
                 c_idx = remaining_candidates.pop(0)
                 cand_b = kept_detections[c_idx]["box"]
-
-                # Collision check against existing boxes across all categories
-                collides_existing = False
-                for other_cat in result.objects:
-                    for other_inst in other_cat.instances:
-                        if other_inst.bounding_box is not None:
-                            ob = {
-                                'x_min': other_inst.bounding_box.x_min,
-                                'y_min': other_inst.bounding_box.y_min,
-                                'x_max': other_inst.bounding_box.x_max,
-                                'y_max': other_inst.bounding_box.y_max
-                            }
-                            other_is_surface = other_cat.name.lower() in SURFACE_OBJECT_NAMES
-                            this_is_surface = cat_name in SURFACE_OBJECT_NAMES
-                            cand_area = (cand_b['x_max'] - cand_b['x_min']) * (cand_b['y_max'] - cand_b['y_min'])
-                            ob_area = (ob['x_max'] - ob['x_min']) * (ob['y_max'] - ob['y_min'])
-                            rel_area_ratio = (min(cand_area, ob_area) / max(cand_area, ob_area)) if max(cand_area, ob_area) > 0 else 0
-
-                            if other_is_surface or this_is_surface:
-                                # Overlap with a supporting surface (e.g. smartwatch resting on towel) is normal unless identical
-                                if calculate_iou(cand_b, ob) >= 0.75:
-                                    collides_existing = True
-                                    break
-                            else:
-                                if calculate_iou(cand_b, ob) >= 0.35 or (calculate_containment(cand_b, ob) >= 0.65 and rel_area_ratio >= 0.40):
-                                    collides_existing = True
-                                    break
-                    if collides_existing:
-                        break
-
-                if not collides_existing:
-                    used_detection_indices.add(c_idx)
-                    inst.bounding_box = BoundingBox(**cand_b)
-                    logger.info(
-                        f"[BBOX] category={cat_name} id={inst.id} original=None "
-                        f"localized=[{cand_b['x_min']},{cand_b['y_min']},{cand_b['x_max']},{cand_b['y_max']}] decision=ASSIGN_NEW"
-                    )
-                    break
+                used_detection_indices.add(c_idx)
+                inst.bounding_box = BoundingBox(**cand_b)
+                inst.localization_status = "ok"
+                logger.info(
+                    f"[BBOX] category={cat_name} id={inst.id} original=None "
+                    f"localized=[{cand_b['x_min']},{cand_b['y_min']},{cand_b['x_max']},{cand_b['y_max']}] decision=ASSIGN_NEW"
+                )
+            else:
+                inst.localization_status = "missing"
 
     return result
 

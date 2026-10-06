@@ -1,0 +1,101 @@
+[
+  {
+    "label": "book",
+    "box": {
+      "x_min": 170,
+      "y_min": 145,
+      "x_max": 380,
+      "y_max": 530
+    }
+  },
+  {
+    "label": "headphones",
+    "box": {
+      "x_min": 175,
+      "y_min": 580,
+      "x_max": 450,
+      "y_max": 890
+    }
+  },
+  {
+    "label": "sunglasses",
+    "box": {
+      "x_min": 420,
+      "y_min": 415,
+      "x_max": 490,
+      "y_max": 655
+    }
+  },
+  {
+    "label": "pen",
+    "box": {
+      "x_min": 405,
+      "y_min": 150,
+      "x_max": 425,
+      "y_max": 420
+    }
+  },
+  {
+    "label": "pen",
+    "box": {
+      "x_min": 435,
+      "y_min": 150,
+      "x_max": 455,
+      "y_max": 415
+    }
+  },
+  {
+    "label": "pen",
+    "box": {
+      "x_min": 465,
+      "y_min": 150,
+      "x_max": 485,
+      "y_max": 415
+    }
+  },
+  {
+    "label": "computer mouse",
+    "box": {
+      "x_min": 530,
+      "y_min": 275,
+      "x_max": 685,
+      "y_max": 375
+    }
+  },
+  {
+    "label": "keyboard",
+    "box": {
+      "x_min": 505,
+      "y_min": 405,
+      "x_max": 695,
+      "y_max": 895
+    }
+  },
+  {
+    "label": "usb adapter",
+    "box": {
+      "x_min": 490,
+      "y_min": 195,
+      "x_max": 580,
+      "y_max": 245
+    }
+  },
+  {
+    "label": "laptop",
+    "box": {
+      "x_min": 725,
+      "y_min": 135,
+      "x_max": 1000,
+      "y_max": 700
+    }
+  },
+  {
+    "label": "smartphone",
+    "box": {
+      "x_min": 815,
+      "y_min": 755,
+      "x_max": 1000,
+      "y_max": 895
+    }
+  }
+]

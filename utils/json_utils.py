@@ -273,6 +273,7 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
                 'id': str(inst_id),
                 'attributes': norm_attr,
                 'bounding_box': norm_box,
+                'localization_status': 'ok' if norm_box is not None else 'missing',
                 'uncertainty_reason': str(unc_reason) if unc_reason else None
             })
 

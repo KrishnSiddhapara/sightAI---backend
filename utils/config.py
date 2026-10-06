@@ -33,6 +33,15 @@ FALLBACK_VLM_MODEL: str = "gemini-2.5-flash"
 # Debug logging flag
 DEBUG_ANALYSIS: bool = os.getenv("DEBUG_ANALYSIS", "true").lower() in ["true", "1", "yes"]
 
+# Dedicated Bounding Box Localization & Refinement Settings
+BBOX_REFINE_ENABLED: bool = os.getenv("BBOX_REFINE", "1").lower() in ["1", "true", "yes"]
+BBOX_DETECTION_MODEL: str = os.getenv("BBOX_DETECTION_MODEL", "gemini-2.5-flash").strip()
+BBOX_THINKING_BUDGET: int = int(os.getenv("BBOX_THINKING_BUDGET", "0"))
+BBOX_USE_STRICT_SCHEMA: bool = os.getenv("BBOX_USE_STRICT_SCHEMA", "0").lower() in ["1", "true", "yes"]
+BBOX_TARGETED_REDETECT: bool = os.getenv("BBOX_TARGETED_REDETECT", "1").lower() in ["1", "true", "yes"]
+BBOX_CROP_REFINEMENT: bool = os.getenv("BBOX_CROP_REFINEMENT", "0").lower() in ["1", "true", "yes"]
+LOCALIZATION_TIMEOUT: float = float(os.getenv("LOCALIZATION_TIMEOUT", "30.0"))
+
 # Allowed Frontend CORS Origins
 DEFAULT_ORIGINS = [
     "http://localhost:5173",

@@ -1,0 +1,110 @@
+[
+  {
+    "label": "smartwatch",
+    "box": {
+      "x_min": 0,
+      "y_min": 0,
+      "x_max": 300,
+      "y_max": 670
+    }
+  },
+  {
+    "label": "towel",
+    "box": {
+      "x_min": 0,
+      "y_min": 0,
+      "x_max": 580,
+      "y_max": 600
+    }
+  },
+  {
+    "label": "computer mouse",
+    "box": {
+      "x_min": 330,
+      "y_min": 0,
+      "x_max": 660,
+      "y_max": 310
+    }
+  },
+  {
+    "label": "plant",
+    "box": {
+      "x_min": 700,
+      "y_min": 0,
+      "x_max": 1000,
+      "y_max": 170
+    }
+  },
+  {
+    "label": "candle",
+    "box": {
+      "x_min": 340,
+      "y_min": 620,
+      "x_max": 470,
+      "y_max": 750
+    }
+  },
+  {
+    "label": "elephant figurine",
+    "box": {
+      "x_min": 760,
+      "y_min": 290,
+      "x_max": 960,
+      "y_max": 475
+    }
+  },
+  {
+    "label": "elephant figurine",
+    "box": {
+      "x_min": 620,
+      "y_min": 410,
+      "x_max": 745,
+      "y_max": 500
+    }
+  },
+  {
+    "label": "elephant figurine",
+    "box": {
+      "x_min": 540,
+      "y_min": 595,
+      "x_max": 670,
+      "y_max": 745
+    }
+  },
+  {
+    "label": "elephant figurine",
+    "box": {
+      "x_min": 135,
+      "y_min": 740,
+      "x_max": 295,
+      "y_max": 910
+    }
+  },
+  {
+    "label": "elephant figurine",
+    "box": {
+      "x_min": 400,
+      "y_min": 815,
+      "x_max": 550,
+      "y_max": 950
+    }
+  },
+  {
+    "label": "container",
+    "box": {
+      "x_min": 690,
+      "y_min": 515,
+      "x_max": 885,
+      "y_max": 715
+    }
+  },
+  {
+    "label": "potted plant",
+    "box": {
+      "x_min": 570,
+      "y_min": 655,
+      "x_max": 1000,
+      "y_max": 1000
+    }
+  }
+]
