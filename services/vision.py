@@ -28,7 +28,7 @@ STEP 1: FULL IMAGE SCAN & ENTITY DETECTION
 - Scan the entire image for distinct, visually observable physical entities.
 - Distinguish between real physical objects in the 3D scene vs reflections in mirrors/glass, shadows on surfaces, or pictures shown inside posters/TV screens/paintings.
 - DO NOT count reflections, shadows, or images shown inside screens/posters/photos as real physical objects.
-- OBJECT CATEGORY CONTROL: Detect up to a maximum of 15 primary, clearly visible physical object categories. Do NOT produce an endless list of trivial background micro-objects (such as individual leaves, tiny pebbles, or distant background specks).
+- OBJECT CATEGORY CONTROL: Exhaustively detect and localize ALL visible physical objects and items present in the scene without arbitrary truncation or omission. Do NOT cap or limit the number of valid items. (Only ignore trivial background micro-textures like individual leaves or tiny specks).
 - ACCURATE OBJECT CATEGORY DISAMBIGUATION:
   * Organic vs Synthetic: A 'plant' MUST have real organic leaves, foliage, stems, or soil. Do NOT label smooth synthetic/plastic/metal containers, jars, pucks, or lids as 'plant' simply because they are green! A round jar/puck is a 'container' or 'round container'.
   * Light / Candle vs Figurine: A candle or tea light with a wax body, wick, or flame is a 'candle', NEVER an 'elephant figurine' or statue.
@@ -337,7 +337,7 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
         for instance in category.instances:
             bbox = instance.bounding_box
             if bbox is not None:
-                sanitized = sanitize_box(bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max, min_size_px_in_1000=5.0)
+                sanitized = sanitize_box(bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max, min_size_px_in_1000=2.0)
                 if sanitized:
                     bbox.x_min = sanitized['x_min']
                     bbox.y_min = sanitized['y_min']
@@ -780,7 +780,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
                 if attempt == 1:
                     user_prompt = "Perform strict visual verification, physical instance counting, independent attribute analysis, TIGHT bounding box localization, and scene classification on this image. Provide 'box_2d': [ymin, xmin, ymax, xmax] normalized to 0-1000 for each detected object instance (ymin/ymax vertical, xmin/xmax horizontal). Each box MUST tightly fit the visible object."
                 else:
-                    user_prompt = "CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, limit object categories to top 10 most prominent items, and keep scene summary under 15 words. Provide 'box_2d': [ymin, xmin, ymax, xmax] normalized to 0-1000 for instances."
+                    user_prompt = "CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, detect all visible physical items without omitting any, and keep scene summary under 15 words. Provide 'box_2d': [ymin, xmin, ymax, xmax] normalized to 0-1000 for instances."
 
                 logger.info(
                     f"[VLM_CONFIG] model='{model_name}' | attempt={attempt}/2 | max_output_tokens={MAX_OUTPUT_TOKENS} | "
