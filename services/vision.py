@@ -51,12 +51,16 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
   * y_min = Topmost vertical edge of the object (0 = top image boundary, 1000 = bottom image boundary)
   * x_max = Rightmost horizontal edge of the object (0 to 1000, MUST be > x_min)
   * y_max = Bottommost vertical edge of the object (0 to 1000, MUST be > y_min)
+- COORDINATE SYSTEM CALIBRATION: The 0-1000 coordinate space maps linearly across the FULL image rectangle. The user will tell you the exact pixel dimensions (W×H) in their request. Use that to calibrate your spatial awareness:
+  * An object at the exact center of the image = x_min~400, y_min~400, x_max~600, y_max~600
+  * An object in the top-left corner = x_min~0, y_min~0
+  * An object in the bottom-right corner = x_max~1000, y_max~1000
 - CRITICAL BOUNDING BOX ACCURACY RULES:
-  1. TIGHT FIT: The bounding box MUST tightly surround the visible physical extent of that specific object. Do NOT include unnecessary surrounding background space, empty desk space, wires, or shadows. Avoid oversized or misplaced boxes.
-  2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure horizontal left-to-right position; y_min and y_max measure vertical top-to-bottom position. Double-check that horizontal X and vertical Y coordinates are NOT transposed or swapped!
-  3. INDEPENDENT INSTANCES: Each physical instance (e.g., elephant figurine_1, elephant figurine_2, mouse_1) MUST have its own separate, independently calculated bounding box enclosing that exact physical item. NEVER copy, duplicate, or mirror bounding box coordinates across different objects.
-  4. SMALL & TABLETOP OBJECTS: For small items (e.g. elephant figurines, pens, phones, cups, bottles, computer mice, small electronics), detect each individual piece carefully and ensure the box is compact and tightly fitted around the actual item bounds. Do not place boxes on empty spaces or mouse tails.
-  5. OVERLAPPING OBJECTS & UNIQUE LOCALIZATION: For nearby or overlapping objects, ensure each box accurately tracks its own item. Do not generate multiple overlapping boxes for the exact same physical item under different category names.
+  1. TIGHT FIT: The bounding box MUST tightly surround ONLY the visible physical extent of that specific object instance. Do NOT include surrounding background, empty desk/table space, cords, wires, or shadows. Oversized boxes are WRONG.
+  2. SPATIAL AXIS ALIGNMENT: x_min and x_max measure HORIZONTAL left-to-right position; y_min and y_max measure VERTICAL top-to-bottom position. NEVER swap or transpose X↔Y axes! If an object is horizontally left, its x_min should be low (~0-200). If it is vertically high, its y_min should be low (~0-200).
+  3. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
+  4. SMALL & TABLETOP OBJECTS: For small items (figurines, pens, phones, cups, mice, watches), detect each individual piece and ensure the box is compact and tightly fitted. Do NOT place boxes on empty spaces, shadows, or cables.
+  5. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
   6. OCCLUSION & BOUNDARIES: Enclose only the visible physical extent of the object. Do not invent bounding boxes for non-existent objects or areas outside the image frame.
   7. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'bounding_box': null. NEVER return fake or estimated coordinates!
 
@@ -190,10 +194,16 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
     return result
 
 
-def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) -> GroundedAnalysisResult:
+def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, image_width: int = 0, image_height: int = 0) -> GroundedAnalysisResult:
     """
     Sends image or pre-encoded Part to Gemini VLM with structured Pydantic schema (GroundedAnalysisResult).
     Uses PRIMARY_VLM_MODEL and FALLBACK_VLM_MODEL with explicit timeouts, normalization, and field-level validation logging.
+    
+    Args:
+        image: PIL Image or pre-encoded Part object.
+        api_key: Gemini API key.
+        image_width: Width in pixels of the image being analyzed (for spatial calibration).
+        image_height: Height in pixels of the image being analyzed (for spatial calibration).
     """
     if not api_key or api_key == "your_api_key_here":
         raise ValueError("API_KEY_ERROR: Gemini API key (VLM_API_KEY) is missing or unconfigured.")
@@ -201,8 +211,11 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
     if isinstance(image, types.Part):
         image_part = image
     elif isinstance(image, Image.Image):
-        img_bytes, mime_type, _, _ = encode_vlm_image_part(image)
+        img_bytes, mime_type, enc_w, enc_h = encode_vlm_image_part(image)
         image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+        # Use encoded dimensions if caller didn't provide explicit dimensions
+        if image_width <= 0 or image_height <= 0:
+            image_width, image_height = enc_w, enc_h
     else:
         raise ValueError("INVALID_IMAGE: Provided input is not a valid image or Part object.")
 
@@ -224,6 +237,12 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
     if FALLBACK_VLM_MODEL and FALLBACK_VLM_MODEL not in models_to_try:
         models_to_try.append(FALLBACK_VLM_MODEL)
 
+    # Build dimension context string for user prompt
+    dimension_context = ""
+    if image_width > 0 and image_height > 0:
+        aspect = "landscape" if image_width > image_height else ("portrait" if image_height > image_width else "square")
+        dimension_context = f"\n\nIMAGE DIMENSIONS: This image is {image_width} × {image_height} pixels ({aspect}). Use this to calibrate your bounding box coordinate accuracy. The 0-1000 coordinate scale maps linearly across the full {image_width}px width (X axis) and {image_height}px height (Y axis)."
+
     last_exception = None
     t0 = time.perf_counter()
 
@@ -232,9 +251,9 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str) 
             try:
                 # On retry after MAX_TOKENS, use a hyper-concise user prompt instruction
                 if attempt == 1:
-                    user_prompt = "Perform strict visual verification, physical instance counting, independent attribute analysis, bounding box localization, and scene classification on this image."
+                    user_prompt = f"Perform strict visual verification, physical instance counting, independent attribute analysis, TIGHT bounding box localization, and scene classification on this image. Return bounding_box coordinates as dict {{x_min, y_min, x_max, y_max}} in 0-1000 scale. Each box MUST tightly fit the visible object — no extra padding, no background space. Verify x_min < x_max and y_min < y_max for every box.{dimension_context}"
                 else:
-                    user_prompt = "CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, limit object categories to top 10 most prominent items, and keep scene summary under 15 words. Do NOT list trivial background micro-objects or write prose descriptions inside attributes."
+                    user_prompt = f"CONCISE RETRY: Previous response hit token limit. Return the exact GroundedAnalysisResult JSON schema using EXTREMELY concise 1-2 word attribute values, limit object categories to top 10 most prominent items, and keep scene summary under 15 words. Do NOT list trivial background micro-objects or write prose descriptions inside attributes.{dimension_context}"
 
                 logger.info(
                     f"[VLM_CONFIG] model='{model_name}' | attempt={attempt}/2 | max_output_tokens={MAX_OUTPUT_TOKENS} | "

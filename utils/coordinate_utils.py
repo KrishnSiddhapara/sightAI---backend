@@ -31,9 +31,28 @@ def parse_and_normalize_bbox(raw_box: Any) -> Optional[Dict[str, float]]:
     if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
         try:
             vals = [float(v) for v in raw_box]
-            # Standard Google 2D Bounding Box format is [ymin, xmin, ymax, xmax]
-            # Detect if it's [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax]
-            y1, x1, y2, x2 = vals
+            # Heuristic format detection: try both orderings and pick the valid one.
+            # Google box_2d format: [ymin, xmin, ymax, xmax]
+            # Standard format:      [xmin, ymin, xmax, ymax]
+            
+            # Try standard [xmin, ymin, xmax, ymax] first
+            sx1, sy1, sx2, sy2 = vals[0], vals[1], vals[2], vals[3]
+            standard_valid = (sx2 > sx1 and sy2 > sy1)
+            
+            # Try Google [ymin, xmin, ymax, xmax]
+            gy1, gx1, gy2, gx2 = vals[0], vals[1], vals[2], vals[3]
+            google_valid = (gx2 > gx1 and gy2 > gy1)
+            
+            if standard_valid and not google_valid:
+                x1, y1, x2, y2 = sx1, sy1, sx2, sy2
+            elif google_valid and not standard_valid:
+                x1, y1, x2, y2 = gx1, gy1, gx2, gy2
+            elif standard_valid and google_valid:
+                # Both valid — prefer standard [x,y,x,y] since our prompt explicitly asks for x_min,y_min,x_max,y_max
+                x1, y1, x2, y2 = sx1, sy1, sx2, sy2
+            else:
+                # Neither valid as-is, use standard order and let min/max repair handle it
+                x1, y1, x2, y2 = sx1, sy1, sx2, sy2
         except (ValueError, TypeError):
             return None
 

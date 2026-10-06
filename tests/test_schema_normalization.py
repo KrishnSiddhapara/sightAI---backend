@@ -89,7 +89,7 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
                     "instances": [
                         {
                             "id": "car_1",
-                            "bounding_box": [150, 50, 450, 600]  # [ymin, xmin, ymax, xmax]
+                            "bounding_box": [150, 50, 450, 600]  # Heuristic: both [y,x,y,x] and [x,y,x,y] are valid, prefers standard [x,y,x,y]
                         }
                     ]
                 }
@@ -99,10 +99,11 @@ class TestSchemaNormalizationAndValidation(unittest.TestCase):
         }
         norm = normalize_grounded_analysis(payload)
         res = GroundedAnalysisResult.model_validate(norm)
-        self.assertEqual(res.objects[0].instances[0].bounding_box.x_min, 50)
-        self.assertEqual(res.objects[0].instances[0].bounding_box.y_min, 150)
-        self.assertEqual(res.objects[0].instances[0].bounding_box.x_max, 600)
-        self.assertEqual(res.objects[0].instances[0].bounding_box.y_max, 450)
+        # With heuristic detection, standard [xmin, ymin, xmax, ymax] is preferred when both orderings are valid
+        self.assertEqual(res.objects[0].instances[0].bounding_box.x_min, 150)
+        self.assertEqual(res.objects[0].instances[0].bounding_box.y_min, 50)
+        self.assertEqual(res.objects[0].instances[0].bounding_box.x_max, 450)
+        self.assertEqual(res.objects[0].instances[0].bounding_box.y_max, 600)
 
     def test_float_coordinate_scale_0_to_1_normalization(self):
         payload = {
