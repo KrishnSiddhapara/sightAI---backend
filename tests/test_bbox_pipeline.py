@@ -20,6 +20,7 @@ from utils.json_utils import normalize_grounded_analysis
 from services.vision import (
     refine_bounding_boxes,
     sanitize_bounding_boxes,
+    reconcile_unboxed_instances,
     labels_match,
     normalize_label
 )
@@ -446,6 +447,65 @@ class TestBoundingBoxPipeline(unittest.TestCase):
         self.assertIsNotNone(sanitized.objects[1].instances[0].bounding_box)
         # Spurious elephant figurine 2 on candle must be suppressed
         self.assertIsNone(sanitized.objects[1].instances[1].bounding_box)
+
+    def test_reconcile_unboxed_instances_synchronizes_counts(self):
+        """
+        Verify that reconcile_unboxed_instances verifies and synchronizes confirmed_count.
+        """
+        inst1 = ObjectInstance(id="elephant_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=200, y_max=200))
+        inst2 = ObjectInstance(id="elephant_2", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=200, y_min=200, x_max=300, y_max=300))
+        inst3 = ObjectInstance(id="elephant_3", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=300, y_min=300, x_max=400, y_max=400))
+
+        # Category with 3 boxed instances but confirmed_count was erroneously 1
+        cat = DetectedObjectCategory(name="elephant figurine", confirmed_count=1, instances=[inst1, inst2, inst3])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="3 figurines.")
+
+        reconciled = reconcile_unboxed_instances(res)
+        # Confirmed count must be updated to 3 to match the boxed instances
+        self.assertEqual(reconciled.objects[0].confirmed_count, 3)
+        self.assertEqual(len(reconciled.objects[0].instances), 3)
+
+    def test_compound_and_head_noun_label_matching(self):
+        """
+        Verify that compound category labels match by head noun or token subset safely.
+        """
+        self.assertTrue(labels_match("snake plant", "plant"))
+        self.assertTrue(labels_match("plant", "snake plant"))
+        self.assertTrue(labels_match("white towel", "towel"))
+        self.assertTrue(labels_match("tea light candle", "candle"))
+        self.assertTrue(labels_match("elephant figurine", "figurine"))
+        self.assertTrue(labels_match("gaming mouse", "mouse"))
+
+        # Distinct objects must NOT match
+        self.assertFalse(labels_match("plant", "candle"))
+        self.assertFalse(labels_match("towel", "keyboard"))
+        self.assertFalse(labels_match("mouse", "elephant"))
+
+    def test_normalize_grounded_analysis_synthesizes_missing_instances(self):
+        """
+        Verify that if confirmed_count > len(instances), normalize_grounded_analysis
+        synthesizes missing instances so they can be localized.
+        """
+        raw = {
+            "objects": [
+                {
+                    "name": "candle",
+                    "confirmed_count": 3,
+                    "instances": [
+                        {"id": "candle_1", "box_2d": [100, 100, 200, 200]}
+                        # Missing candle_2 and candle_3
+                    ]
+                }
+            ],
+            "scene": {"summary": "A room"},
+            "overall_summary": "Summary"
+        }
+        normalized = normalize_grounded_analysis(raw)
+        instances = normalized["objects"][0]["instances"]
+        self.assertEqual(len(instances), 3)
+        self.assertEqual(instances[0]["id"], "candle_1")
+        self.assertEqual(instances[1]["id"], "candle_2")
+        self.assertEqual(instances[2]["id"], "candle_3")
 
 
 if __name__ == "__main__":

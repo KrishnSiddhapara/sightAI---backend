@@ -249,13 +249,22 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
             # 2. Standard 'bounding_box' / 'boundingBox' is a dict {x_min, y_min, x_max, y_max}
             #    or standard list [x_min, y_min, x_max, y_max]
             # We never guess coordinate order by mathematical validity.
-            raw_box_2d = inst_item.get('box_2d') if inst_item.get('box_2d') is not None else inst_item.get('box2d')
-            raw_bbox = inst_item.get('bounding_box') if inst_item.get('bounding_box') is not None else inst_item.get('boundingBox')
+            raw_box_2d = (
+                inst_item.get('box_2d') or 
+                inst_item.get('box2d') or 
+                inst_item.get('box_2D')
+            )
+            raw_bbox = (
+                inst_item.get('bounding_box') or 
+                inst_item.get('boundingBox') or 
+                inst_item.get('bbox') or 
+                inst_item.get('box')
+            )
 
             norm_box = None
             if raw_box_2d is not None:
                 norm_box = parse_gemini_box_2d(raw_box_2d)
-            elif raw_bbox is not None:
+            if norm_box is None and raw_bbox is not None:
                 norm_box = parse_standard_bbox(raw_bbox)
 
             unc_reason = inst_item.get('uncertainty_reason') or inst_item.get('uncertaintyReason')
@@ -266,6 +275,26 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
                 'bounding_box': norm_box,
                 'uncertainty_reason': str(unc_reason) if unc_reason else None
             })
+
+        # If confirmed_count exceeds the number of provided instances, synthesize placeholders
+        # so the secondary localization pass can detect and assign them boxes!
+        if conf_count > len(norm_instances):
+            for missing_idx in range(len(norm_instances) + 1, conf_count + 1):
+                norm_instances.append({
+                    'id': f'{name}_{missing_idx}',
+                    'attributes': {
+                        'clothing': 'not clearly visible',
+                        'clothing_color': 'not clearly visible',
+                        'pose': 'unknown',
+                        'action': 'unknown',
+                        'accessories': 'none visible',
+                        'object_color': 'not clearly visible',
+                        'type_or_subtype': 'unknown',
+                        'visible_details': 'none noted',
+                    },
+                    'bounding_box': None,
+                    'uncertainty_reason': None
+                })
 
         norm_objects.append({
             'name': str(name).lower(),

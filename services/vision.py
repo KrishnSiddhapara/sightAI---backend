@@ -58,13 +58,14 @@ STEP 4: GROUNDED BOUNDING BOX LOCALIZATION & ACCURACY
   * ymax = Bottommost vertical edge of the object (0 to 1000, MUST be > ymin)
   * xmax = Rightmost horizontal edge of the object (0 to 1000, MUST be > xmin)
 - CRITICAL BOUNDING BOX ACCURACY RULES:
-  1. TIGHT VISUAL FIT: The bounding box MUST tightly hug the outermost visible physical pixels of the object. No extra margins, background padding, or shadows. Oversized or loose boxes are WRONG.
-  2. EXACT OBJECT ANCHOR: The box MUST be placed directly on the visual center and extent of the object. Never shift a box onto empty space or onto a different neighboring object!
-  3. ADJACENT OBJECTS (NO OVERLAP): Two distinct tabletop objects NEVER occupy the exact same physical space. If two objects sit next to each other, their boxes must stop at the visual separation line and NOT bleed into or overlap each other.
-  4. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
-  5. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
-  6. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
-  7. UNCERTAIN LOCALIZATION: If localization for an instance is uncertain, unconfirmed, or severely occluded, set 'box_2d': null. NEVER return fake or estimated coordinates!
+  1. 100% BOUNDING BOX COVERAGE (ZERO UNBOXED INSTANCES): Every single confirmed object in 'instances' MUST have its own tight 'box_2d'. There must NEVER be an instance with 'box_2d': null or missing coordinates! If an object is visible, you MUST frame its exact visible extent.
+  2. TIGHT VISUAL FIT: The bounding box MUST tightly hug the outermost visible physical pixels of the object. No extra margins, background padding, or shadows. Oversized or loose boxes are WRONG.
+  3. EXACT OBJECT ANCHOR: The box MUST be placed directly on the visual center and extent of the object. Never shift a box onto empty space or onto a different neighboring object!
+  4. ADJACENT OBJECTS (NO OVERLAP): Two distinct tabletop objects NEVER occupy the exact same physical space. If two objects sit next to each other, their boxes must stop at the visual separation line and NOT bleed into or overlap each other.
+  5. NATIVE AXIS ALIGNMENT: ymin and ymax measure VERTICAL position (top to bottom); xmin and xmax measure HORIZONTAL position (left to right).
+  6. INDEPENDENT INSTANCES: Each distinct physical instance MUST have its own separately calculated bounding box enclosing that exact item. NEVER copy, duplicate, or share coordinates between different objects.
+  7. ONE BOX PER PHYSICAL ITEM: Never generate multiple overlapping boxes for the same physical item under different category names. Each real-world object gets exactly ONE bounding box.
+  8. UNCERTAIN OBJECTS: If an item is too occluded, distant, or unclear to localize with a bounding box, do NOT place it in 'instances' or 'confirmed_count'. Instead, record it under 'uncertain_count' with an explanation in 'uncertainty_reason'.
 
 STEP 5: SCENE UNDERSTANDING & DESCRIPTION
 - Provide detailed scene details under 'environment', 'primary_activity', and 'summary'.
@@ -195,14 +196,38 @@ def normalize_label(label: str) -> str:
 
 def labels_match(label1: str, label2: str) -> bool:
     """
-    Strict category match: exact normalized match or safe explicit alias match only.
-    Prevents unrelated labels (e.g. 'cup' vs 'bottle', 'phone' vs 'laptop') from matching.
+    Checks if two category labels refer to the same semantic class.
+    Uses exact normalized comparison, safe explicit alias mapping, and compound head-noun matching.
+    Prevents false merges between distinct classes (e.g. 'cup' vs 'bottle', 'phone' vs 'laptop').
     """
+    if not label1 or not label2:
+        return False
+
+    c1 = re.sub(r'[^a-z0-9\s]', '', label1.lower().strip())
+    c2 = re.sub(r'[^a-z0-9\s]', '', label2.lower().strip())
+    if not c1 or not c2:
+        return False
+    if c1 == c2:
+        return True
+
     n1 = normalize_label(label1)
     n2 = normalize_label(label2)
-    if not n1 or not n2:
-        return False
-    return n1 == n2
+    if n1 == n2:
+        return True
+
+    generic_heads = {"object", "item", "thing", "part", "shape", "blob"}
+
+    for w1, w2 in [(n1.split(), n2.split()), (c1.split(), c2.split())]:
+        if not w1 or not w2:
+            continue
+        if w1[-1] == w2[-1] and w1[-1] not in generic_heads:
+            return True
+        if len(w1) == 1 and w1[0] == w2[-1] and w1[0] not in generic_heads:
+            return True
+        if len(w2) == 1 and w2[0] == w1[-1] and w2[0] not in generic_heads:
+            return True
+
+    return False
 
 def resolve_adjacent_box_overlaps(instances: List[Tuple[str, ObjectInstance, Dict[str, float]]]) -> None:
     """
@@ -400,6 +425,23 @@ def sanitize_bounding_boxes(result: GroundedAnalysisResult) -> GroundedAnalysisR
     # Step 3: Adjacent Box Boundary Separation (minor border bleeds only)
     active_instances = [all_instances[i] for i in range(n) if i not in discard_indices]
     resolve_adjacent_box_overlaps(active_instances)
+
+    return result
+
+
+def reconcile_unboxed_instances(result: GroundedAnalysisResult) -> GroundedAnalysisResult:
+    """
+    Ensures consistency across detected objects and instances:
+    1. Verifies that confirmed_count accurately reflects detected instances.
+    2. If confirmed_count is missing or smaller than boxed instances, synchronizes it.
+    3. Preserves all instance attributes and coordinates.
+    """
+    for cat in result.objects:
+        boxed_count = sum(1 for inst in cat.instances if inst.bounding_box is not None)
+        if cat.confirmed_count < boxed_count:
+            cat.confirmed_count = boxed_count
+        elif not cat.confirmed_count and cat.instances:
+            cat.confirmed_count = len(cat.instances)
 
     return result
 
@@ -797,6 +839,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
                 final_res = sanitize_bounding_boxes(raw_result)
                 final_res = refine_bounding_boxes(final_res, image_part, api_key, model_name)
                 final_res = sanitize_bounding_boxes(final_res)
+                final_res = reconcile_unboxed_instances(final_res)
                 logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}).")
                 return final_res
 

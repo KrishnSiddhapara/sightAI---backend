@@ -94,6 +94,7 @@ def parse_gemini_box_2d(raw_box: Any) -> Optional[Dict[str, float]]:
     """
     Explicitly converts Gemini native box_2d / box2d format:
         [ymin, xmin, ymax, xmax] (normalized 0 - 1000 or 0.0 - 1.0)
+    or dictionary {'ymin': ..., 'xmin': ..., 'ymax': ..., 'xmax': ...}
     into canonical:
         {'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float}
 
@@ -102,6 +103,14 @@ def parse_gemini_box_2d(raw_box: Any) -> Optional[Dict[str, float]]:
     In Gemini native format, element 0 is ALWAYS ymin, element 1 is ALWAYS xmin,
     element 2 is ALWAYS ymax, element 3 is ALWAYS xmax.
     """
+    if isinstance(raw_box, dict):
+        ymin = raw_box.get('ymin') if raw_box.get('ymin') is not None else raw_box.get('y_min')
+        xmin = raw_box.get('xmin') if raw_box.get('xmin') is not None else raw_box.get('x_min')
+        ymax = raw_box.get('ymax') if raw_box.get('ymax') is not None else raw_box.get('y_max')
+        xmax = raw_box.get('xmax') if raw_box.get('xmax') is not None else raw_box.get('x_max')
+        if all(v is not None for v in (ymin, xmin, ymax, xmax)):
+            raw_box = [ymin, xmin, ymax, xmax]
+
     if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
         return None
 
@@ -132,7 +141,7 @@ def parse_standard_bbox(raw_box: Any) -> Optional[Dict[str, float]]:
     {'x_min': float, 'y_min': float, 'x_max': float, 'y_max': float} (0-1000 scale)
 
     Handles:
-    - Dictionary with explicit keys: x_min/xmin/xMin, y_min/ymin/yMin, x_max/xmax/xMax, y_max/ymax/yMax
+    - Dictionary with explicit keys: x_min/xmin/xMin/left, y_min/ymin/yMin/top, x_max/xmax/xMax/right, y_max/ymax/yMax/bottom
     - 4-element list/tuple in standard order [x_min, y_min, x_max, y_max]
 
     IMPORTANT:
@@ -145,10 +154,10 @@ def parse_standard_bbox(raw_box: Any) -> Optional[Dict[str, float]]:
 
     # Case 1: Dictionary format with explicit keys
     if isinstance(raw_box, dict):
-        raw_x_min = raw_box.get('x_min') if raw_box.get('x_min') is not None else raw_box.get('xmin', raw_box.get('xMin'))
-        raw_y_min = raw_box.get('y_min') if raw_box.get('y_min') is not None else raw_box.get('ymin', raw_box.get('yMin'))
-        raw_x_max = raw_box.get('x_max') if raw_box.get('x_max') is not None else raw_box.get('xmax', raw_box.get('xMax'))
-        raw_y_max = raw_box.get('y_max') if raw_box.get('y_max') is not None else raw_box.get('ymax', raw_box.get('yMax'))
+        raw_x_min = raw_box.get('x_min') if raw_box.get('x_min') is not None else raw_box.get('xmin', raw_box.get('xMin', raw_box.get('left')))
+        raw_y_min = raw_box.get('y_min') if raw_box.get('y_min') is not None else raw_box.get('ymin', raw_box.get('yMin', raw_box.get('top')))
+        raw_x_max = raw_box.get('x_max') if raw_box.get('x_max') is not None else raw_box.get('xmax', raw_box.get('xMax', raw_box.get('right')))
+        raw_y_max = raw_box.get('y_max') if raw_box.get('y_max') is not None else raw_box.get('ymax', raw_box.get('yMax', raw_box.get('bottom')))
 
         if all(v is not None for v in [raw_x_min, raw_y_min, raw_x_max, raw_y_max]):
             try:
