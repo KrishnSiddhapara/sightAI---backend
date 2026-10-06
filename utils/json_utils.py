@@ -1,7 +1,11 @@
 import json
 import re
 
-from utils.coordinate_utils import parse_and_normalize_bbox
+from utils.coordinate_utils import (
+    parse_and_normalize_bbox,
+    parse_gemini_box_2d,
+    parse_standard_bbox
+)
 
 def clean_json_text(text: str) -> str:
     """
@@ -239,9 +243,20 @@ def normalize_grounded_analysis(raw_data: dict) -> dict:
                 'visible_details': str(raw_attr.get('visible_details') or raw_attr.get('visibleDetails') or 'none noted'),
             }
 
-            # Bounding Box
-            raw_box = inst_item.get('bounding_box') or inst_item.get('boundingBox') or inst_item.get('box_2d') or inst_item.get('box2d')
-            norm_box = parse_and_normalize_bbox(raw_box)
+            # Bounding Box Extraction
+            # Coordinate Convention Rules:
+            # 1. Gemini native 'box_2d' / 'box2d' is strictly [ymin, xmin, ymax, xmax] (0-1000 scale)
+            # 2. Standard 'bounding_box' / 'boundingBox' is a dict {x_min, y_min, x_max, y_max}
+            #    or standard list [x_min, y_min, x_max, y_max]
+            # We never guess coordinate order by mathematical validity.
+            raw_box_2d = inst_item.get('box_2d') if inst_item.get('box_2d') is not None else inst_item.get('box2d')
+            raw_bbox = inst_item.get('bounding_box') if inst_item.get('bounding_box') is not None else inst_item.get('boundingBox')
+
+            norm_box = None
+            if raw_box_2d is not None:
+                norm_box = parse_gemini_box_2d(raw_box_2d)
+            elif raw_bbox is not None:
+                norm_box = parse_standard_bbox(raw_bbox)
 
             unc_reason = inst_item.get('uncertainty_reason') or inst_item.get('uncertaintyReason')
 

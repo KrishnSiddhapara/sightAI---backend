@@ -1,0 +1,298 @@
+import unittest
+from unittest.mock import MagicMock, patch
+
+from services.schemas import (
+    GroundedAnalysisResult,
+    DetectedObjectCategory,
+    ObjectInstance,
+    InstanceAttributes,
+    BoundingBox,
+    SceneDescription
+)
+from utils.coordinate_utils import (
+    validate_bbox_coords,
+    parse_gemini_box_2d,
+    parse_standard_bbox,
+    calculate_iou,
+    calculate_center_distance
+)
+from utils.json_utils import normalize_grounded_analysis
+from services.vision import (
+    refine_bounding_boxes,
+    sanitize_bounding_boxes,
+    labels_match,
+    normalize_label
+)
+
+
+class TestBoundingBoxPipeline(unittest.TestCase):
+
+    def test_gemini_box_2d_parsing_explicit_order(self):
+        """
+        Gemini box_2d is strictly [ymin, xmin, ymax, xmax] on a 0-1000 grid.
+        Verify that element 0 is ALWAYS ymin and element 1 is ALWAYS xmin,
+        and no heuristic format guessing occurs even when both orderings are geometrically valid.
+        """
+        # [ymin, xmin, ymax, xmax]
+        # In this example: ymin=150, xmin=50, ymax=450, xmax=600
+        # If incorrectly parsed as [xmin, ymin, xmax, ymax], x_min would be 150 and y_min would be 50.
+        raw_box = [150, 50, 450, 600]
+        parsed = parse_gemini_box_2d(raw_box)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['x_min'], 50.0)
+        self.assertEqual(parsed['y_min'], 150.0)
+        self.assertEqual(parsed['x_max'], 600.0)
+        self.assertEqual(parsed['y_max'], 450.0)
+
+    def test_gemini_box_2d_scale_0_to_1_normalization(self):
+        """Verify 0.0-1.0 normalized coordinates scale properly to 0-1000."""
+        raw_box = [0.15, 0.05, 0.45, 0.60]
+        parsed = parse_gemini_box_2d(raw_box)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['x_min'], 50.0)
+        self.assertEqual(parsed['y_min'], 150.0)
+        self.assertEqual(parsed['x_max'], 600.0)
+        self.assertEqual(parsed['y_max'], 450.0)
+
+    def test_standard_bbox_dictionary_parsing(self):
+        """Verify dictionary format with explicit keys parses correctly."""
+        raw_dict = {"x_min": 100, "y_min": 200, "x_max": 500, "y_max": 600}
+        parsed = parse_standard_bbox(raw_dict)
+        self.assertEqual(parsed, {'x_min': 100.0, 'y_min': 200.0, 'x_max': 500.0, 'y_max': 600.0})
+
+        # Test camelCase and alternate casing
+        raw_camel = {"xmin": 80, "ymin": 90, "xmax": 300, "ymax": 400}
+        parsed_camel = parse_standard_bbox(raw_camel)
+        self.assertEqual(parsed_camel, {'x_min': 80.0, 'y_min': 90.0, 'x_max': 300.0, 'y_max': 400.0})
+
+    def test_json_utils_explicit_box_2d_vs_bounding_box(self):
+        """
+        Verify that in json_utils.normalize_grounded_analysis:
+        - 'box_2d' is explicitly parsed as Gemini [ymin, xmin, ymax, xmax]
+        - 'bounding_box' is explicitly parsed as standard {x_min, y_min, ...}
+        """
+        payload = {
+            "objects": [
+                {
+                    "name": "pen",
+                    "instances": [
+                        {
+                            "id": "pen_1",
+                            "box_2d": [100, 200, 300, 400]  # ymin=100, xmin=200, ymax=300, xmax=400
+                        },
+                        {
+                            "id": "pen_2",
+                            "bounding_box": {"x_min": 200, "y_min": 100, "x_max": 400, "y_max": 300}
+                        }
+                    ]
+                }
+            ],
+            "scene": {"environment": "Desk"},
+            "overall_summary": "Two pens."
+        }
+        normalized = normalize_grounded_analysis(payload)
+        res = GroundedAnalysisResult.model_validate(normalized)
+        inst1_box = res.objects[0].instances[0].bounding_box
+        inst2_box = res.objects[0].instances[1].bounding_box
+
+        # Both representations should produce identical canonical coordinates
+        self.assertEqual(inst1_box.x_min, 200.0)
+        self.assertEqual(inst1_box.y_min, 100.0)
+        self.assertEqual(inst1_box.x_max, 400.0)
+        self.assertEqual(inst1_box.y_max, 300.0)
+
+        self.assertEqual(inst2_box.x_min, 200.0)
+        self.assertEqual(inst2_box.y_min, 100.0)
+        self.assertEqual(inst2_box.x_max, 400.0)
+        self.assertEqual(inst2_box.y_max, 300.0)
+
+    def test_safe_label_matching_prevents_unrelated_matches(self):
+        """Verify strict label matching prevents false cross-category associations."""
+        self.assertTrue(labels_match("pen", "pen"))
+        self.assertTrue(labels_match("pens", "pen"))
+        self.assertTrue(labels_match("cellphone", "phone"))
+        self.assertTrue(labels_match("elephant figurine", "elephant"))
+
+        # MUST NOT match unrelated categories
+        self.assertFalse(labels_match("cup", "bottle"))
+        self.assertFalse(labels_match("phone", "laptop"))
+        self.assertFalse(labels_match("open book", "pen"))
+        self.assertFalse(labels_match("car", "scarf"))
+
+    @patch("services.vision.localize_objects")
+    def test_single_object_refinement_accepted(self, mock_localize):
+        """Test 1: Single object refinement is accepted when consistent."""
+        mock_localize.return_value = [
+            {"label": "laptop", "box": {'x_min': 105.0, 'y_min': 95.0, 'x_max': 495.0, 'y_max': 505.0}}
+        ]
+        inst = ObjectInstance(
+            id="laptop_1",
+            attributes=InstanceAttributes(),
+            bounding_box=BoundingBox(x_min=100.0, y_min=100.0, x_max=500.0, y_max=500.0)
+        )
+        cat = DetectedObjectCategory(name="laptop", confirmed_count=1, instances=[inst])
+        res = GroundedAnalysisResult(
+            objects=[cat],
+            scene=SceneDescription(),
+            overall_summary="A laptop."
+        )
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        refined_box = refined.objects[0].instances[0].bounding_box
+        self.assertEqual(refined_box.x_min, 105.0)
+        self.assertEqual(refined_box.y_min, 95.0)
+        self.assertEqual(refined_box.x_max, 495.0)
+        self.assertEqual(refined_box.y_max, 505.0)
+
+    @patch("services.vision.localize_objects")
+    def test_multiple_same_category_objects_geometric_matching(self, mock_localize):
+        """
+        Test 2: Multiple objects of the same category are matched geometrically
+        using IoU and center distance, NOT by reading order.
+        """
+        # 3 pens at distinct positions
+        inst1 = ObjectInstance(id="pen_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=200, y_max=200))
+        inst2 = ObjectInstance(id="pen_2", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=500, y_min=500, x_max=600, y_max=600))
+        inst3 = ObjectInstance(id="pen_3", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=800, y_min=200, x_max=900, y_max=300))
+
+        # Localization returns candidates in reversed/scrambled order
+        mock_localize.return_value = [
+            {"label": "pen", "box": {'x_min': 802.0, 'y_min': 198.0, 'x_max': 898.0, 'y_max': 302.0}},  # matches pen_3
+            {"label": "pen", "box": {'x_min': 98.0, 'y_min': 102.0, 'x_max': 202.0, 'y_max': 198.0}},   # matches pen_1
+            {"label": "pen", "box": {'x_min': 502.0, 'y_min': 498.0, 'x_max': 598.0, 'y_max': 602.0}}   # matches pen_2
+        ]
+
+        cat = DetectedObjectCategory(name="pen", confirmed_count=3, instances=[inst1, inst2, inst3])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="3 pens.")
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        r_insts = refined.objects[0].instances
+
+        # Verify geometric matching correctly assigned each candidate to the right instance
+        self.assertAlmostEqual(r_insts[0].bounding_box.x_min, 98.0, delta=1.0)
+        self.assertAlmostEqual(r_insts[1].bounding_box.x_min, 502.0, delta=1.0)
+        self.assertAlmostEqual(r_insts[2].bounding_box.x_min, 802.0, delta=1.0)
+
+    @patch("services.vision.localize_objects")
+    def test_different_objects_no_cross_matching(self, mock_localize):
+        """Test 3: Different object categories never cross-match candidates."""
+        inst_laptop = ObjectInstance(id="laptop_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=400, y_max=400))
+        inst_phone = ObjectInstance(id="phone_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=500, y_min=500, x_max=600, y_max=600))
+        inst_bottle = ObjectInstance(id="bottle_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=700, y_min=100, x_max=800, y_max=400))
+
+        mock_localize.return_value = [
+            {"label": "bottle", "box": {'x_min': 702, 'y_min': 98, 'x_max': 798, 'y_max': 402}},
+            {"label": "laptop", "box": {'x_min': 98, 'y_min': 102, 'x_max': 402, 'y_max': 398}},
+            {"label": "phone", "box": {'x_min': 502, 'y_min': 498, 'x_max': 598, 'y_max': 602}},
+        ]
+
+        cat1 = DetectedObjectCategory(name="laptop", confirmed_count=1, instances=[inst_laptop])
+        cat2 = DetectedObjectCategory(name="phone", confirmed_count=1, instances=[inst_phone])
+        cat3 = DetectedObjectCategory(name="bottle", confirmed_count=1, instances=[inst_bottle])
+        res = GroundedAnalysisResult(objects=[cat1, cat2, cat3], scene=SceneDescription(), overall_summary="Desk items.")
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        self.assertAlmostEqual(refined.objects[0].instances[0].bounding_box.x_min, 98.0, delta=1.0)
+        self.assertAlmostEqual(refined.objects[1].instances[0].bounding_box.x_min, 502.0, delta=1.0)
+        self.assertAlmostEqual(refined.objects[2].instances[0].bounding_box.x_min, 702.0, delta=1.0)
+
+    def test_overlapping_objects_preserved_by_conservative_nms(self):
+        """
+        Test 4: Partially overlapping objects of the same category (e.g. 2 overlapping pens, IoU=0.65)
+        are NOT dropped by NMS.
+        """
+        inst1 = ObjectInstance(id="pen_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=300, y_max=300))
+        inst2 = ObjectInstance(id="pen_2", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=150, y_min=150, x_max=350, y_max=350))
+
+        cat = DetectedObjectCategory(name="pen", confirmed_count=2, instances=[inst1, inst2])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="2 pens.")
+
+        sanitized = sanitize_bounding_boxes(res)
+        self.assertIsNotNone(sanitized.objects[0].instances[0].bounding_box)
+        self.assertIsNotNone(sanitized.objects[0].instances[1].bounding_box)
+
+    @patch("services.vision.localize_objects")
+    def test_localization_failure_preserves_original_boxes(self, mock_localize):
+        """Test 8: If localization raises an error, all original valid boxes are preserved."""
+        mock_localize.side_effect = RuntimeError("Gemini API localization timeout")
+
+        inst = ObjectInstance(id="item_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=400, y_max=400))
+        cat = DetectedObjectCategory(name="item", confirmed_count=1, instances=[inst])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="Item.")
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        # Original box must remain untouched
+        self.assertIsNotNone(refined.objects[0].instances[0].bounding_box)
+        self.assertEqual(refined.objects[0].instances[0].bounding_box.x_min, 100.0)
+
+    @patch("services.vision.localize_objects")
+    def test_localization_fewer_objects_preserves_unmatched_original(self, mock_localize):
+        """
+        Test 9: When localization returns fewer objects than the main analysis
+        (e.g., 3 pens originally, but localization only finds 2),
+        the 3rd pen MUST NOT have its box deleted (must NOT become None)!
+        """
+        inst1 = ObjectInstance(id="pen_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=200, y_max=200))
+        inst2 = ObjectInstance(id="pen_2", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=400, y_min=400, x_max=500, y_max=500))
+        inst3 = ObjectInstance(id="pen_3", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=700, y_min=700, x_max=800, y_max=800))
+
+        # Localization only detected 2 of the 3 pens
+        mock_localize.return_value = [
+            {"label": "pen", "box": {'x_min': 102, 'y_min': 98, 'x_max': 198, 'y_max': 202}},
+            {"label": "pen", "box": {'x_min': 402, 'y_min': 398, 'x_max': 498, 'y_max': 502}}
+        ]
+
+        cat = DetectedObjectCategory(name="pen", confirmed_count=3, instances=[inst1, inst2, inst3])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="3 pens.")
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        r_insts = refined.objects[0].instances
+
+        # The first two are refined
+        self.assertAlmostEqual(r_insts[0].bounding_box.x_min, 102.0, delta=1.0)
+        self.assertAlmostEqual(r_insts[1].bounding_box.x_min, 402.0, delta=1.0)
+        # The 3rd pen MUST RETAIN its original valid box!
+        self.assertIsNotNone(r_insts[2].bounding_box)
+        self.assertEqual(r_insts[2].bounding_box.x_min, 700.0)
+        self.assertEqual(r_insts[2].bounding_box.y_min, 700.0)
+
+    @patch("services.vision.localize_objects")
+    def test_inconsistent_localization_box_rejected_keeps_original(self, mock_localize):
+        """
+        Test 10: If a localization candidate is geometrically inconsistent (e.g. far away, IoU=0),
+        the candidate is rejected and the original box is preserved.
+        """
+        inst = ObjectInstance(id="mug_1", attributes=InstanceAttributes(), bounding_box=BoundingBox(x_min=100, y_min=100, x_max=200, y_max=200))
+
+        # Candidate is at bottom-right of the image (center distance > 700px, IoU=0)
+        mock_localize.return_value = [
+            {"label": "mug", "box": {'x_min': 800, 'y_min': 800, 'x_max': 900, 'y_max': 900}}
+        ]
+
+        cat = DetectedObjectCategory(name="mug", confirmed_count=1, instances=[inst])
+        res = GroundedAnalysisResult(objects=[cat], scene=SceneDescription(), overall_summary="A mug.")
+
+        refined = refine_bounding_boxes(res, MagicMock(), "fake_key", "fake_model")
+        # Inconsistent candidate rejected -> original box preserved
+        self.assertEqual(refined.objects[0].instances[0].bounding_box.x_min, 100.0)
+        self.assertEqual(refined.objects[0].instances[0].bounding_box.y_min, 100.0)
+
+    def test_bounding_box_coordinate_validation(self):
+        """Validate bbox coords helper rejects invalid ranges and inversions."""
+        # Valid
+        self.assertTrue(validate_bbox_coords(100.0, 100.0, 200.0, 200.0))
+        # Inverted X
+        self.assertFalse(validate_bbox_coords(300.0, 100.0, 200.0, 200.0))
+        # Inverted Y
+        self.assertFalse(validate_bbox_coords(100.0, 300.0, 200.0, 200.0))
+        # Out of bounds (< 0)
+        self.assertFalse(validate_bbox_coords(-10.0, 100.0, 200.0, 200.0))
+        # Out of bounds (> 1000)
+        self.assertFalse(validate_bbox_coords(100.0, 100.0, 1050.0, 200.0))
+        # NaN / Inf
+        self.assertFalse(validate_bbox_coords(float('nan'), 100.0, 200.0, 200.0))
+        self.assertFalse(validate_bbox_coords(100.0, 100.0, float('inf'), 200.0))
+
+
+if __name__ == "__main__":
+    unittest.main()
