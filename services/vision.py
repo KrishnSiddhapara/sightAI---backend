@@ -2,6 +2,8 @@ import json
 import logging
 import time
 import socket
+import re
+import io
 from typing import List, Tuple, Optional, Union
 # pyrefly: ignore [missing-import]
 from PIL import Image
@@ -119,7 +121,7 @@ CRITICAL RULES:
 - Return a complete and valid JSON object.
 """
 
-import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel, Field
 
 from services.schemas import BoundingBox
@@ -131,7 +133,10 @@ from utils.coordinate_utils import (
     calculate_box_center,
     validate_bbox_coords,
     parse_gemini_box_2d,
-    box_2d_to_dict
+    box_2d_to_dict,
+    map_crop_box_to_full,
+    apply_tile_nms,
+    is_empty_background_crop
 )
 
 GENERIC_OBJECT_NAMES = {
@@ -578,21 +583,206 @@ def redetect_category(
         return []
 
 
+def refine_single_box_crop(
+    pil_img: Image.Image,
+    coarse_box: dict,
+    label: str,
+    api_key: str,
+    model_name: str = BBOX_DETECTION_MODEL
+) -> Optional[dict]:
+    """
+    Crops original PIL image around coarse_box with 20% padding (min size 120px),
+    sends crop to Gemini to detect the tight box of label inside the crop,
+    and maps the crop box back to full image 0-1000 coordinates.
+    Accepts refined box only if IoU(refined, coarse) > 0.30 or IoU > 0.20 with center_dist < 100.
+    """
+    if pil_img is None or not coarse_box:
+        return None
+
+    try:
+        orig_w, orig_h = pil_img.size
+        w_1000 = coarse_box['x_max'] - coarse_box['x_min']
+        h_1000 = coarse_box['y_max'] - coarse_box['y_min']
+
+        pad_x = max(w_1000 * 0.20, 25.0)
+        pad_y = max(h_1000 * 0.20, 25.0)
+
+        crop_xmin_1000 = max(0.0, coarse_box['x_min'] - pad_x)
+        crop_ymin_1000 = max(0.0, coarse_box['y_min'] - pad_y)
+        crop_xmax_1000 = min(1000.0, coarse_box['x_max'] + pad_x)
+        crop_ymax_1000 = min(1000.0, coarse_box['y_max'] + pad_y)
+
+        px_x1 = max(0, int(round(crop_xmin_1000 * orig_w / 1000.0)))
+        px_y1 = max(0, int(round(crop_ymin_1000 * orig_h / 1000.0)))
+        px_x2 = min(orig_w, int(round(crop_xmax_1000 * orig_w / 1000.0)))
+        px_y2 = min(orig_h, int(round(crop_ymax_1000 * orig_h / 1000.0)))
+
+        # Ensure minimum crop dimension of 120px for visual context
+        if (px_x2 - px_x1) < 120:
+            diff = 120 - (px_x2 - px_x1)
+            px_x1 = max(0, px_x1 - diff // 2)
+            px_x2 = min(orig_w, px_x2 + (diff - diff // 2))
+        if (px_y2 - px_y1) < 120:
+            diff = 120 - (px_y2 - px_y1)
+            px_y1 = max(0, px_y1 - diff // 2)
+            px_y2 = min(orig_h, px_y2 + (diff - diff // 2))
+
+        crop_pil = pil_img.crop((px_x1, px_y1, px_x2, px_y2))
+
+        actual_crop_bounds_1000 = {
+            'x_min': (px_x1 / orig_w) * 1000.0,
+            'y_min': (px_y1 / orig_h) * 1000.0,
+            'x_max': (px_x2 / orig_w) * 1000.0,
+            'y_max': (px_y2 / orig_h) * 1000.0
+        }
+
+        crop_bytes, mime_type, _, _ = encode_vlm_image_part(crop_pil, max_dim=1024)
+        crop_part = types.Part.from_bytes(data=crop_bytes, mime_type=mime_type)
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=10000)
+        )
+        prompt = (
+            f"Locate the single tightest bounding box framing the '{label}' inside this cropped image region.\n"
+            "Return a JSON object with 'box_2d': [ymin, xmin, ymax, xmax] (0-1000 scale relative to this crop).\n"
+            "The box MUST tightly hug the physical edges of the item without extra margins or background."
+        )
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=LocalizedBox,
+            temperature=0.0,
+            thinking_config=types.ThinkingConfig(thinking_budget=0)
+        )
+
+        response = client.models.generate_content(model=model_name, contents=[crop_part, prompt], config=config)
+        raw = response.text if response and getattr(response, "text", None) else ""
+        data = json.loads(clean_json_text(raw)) if raw else {}
+
+        raw_box_2d = data.get("box_2d") or data.get("box2d")
+        if not raw_box_2d and isinstance(data, list) and data:
+            raw_box_2d = data[0].get("box_2d") if isinstance(data[0], dict) else None
+
+        crop_box = parse_gemini_box_2d(raw_box_2d)
+        if not crop_box:
+            return None
+
+        full_mapped_box = map_crop_box_to_full(crop_box, actual_crop_bounds_1000)
+        if not full_mapped_box:
+            return None
+
+        iou = calculate_iou(full_mapped_box, coarse_box)
+        containment = calculate_containment(full_mapped_box, coarse_box)
+        dist = calculate_center_distance(full_mapped_box, coarse_box)
+
+        # Accept refined box if IoU >= 0.30 or if contained inside loose coarse box (containment >= 0.60 & dist <= 160)
+        is_accepted = (
+            iou >= 0.30 or
+            (containment >= 0.60 and dist <= 160.0) or
+            (iou >= 0.15 and dist <= 100.0)
+        )
+
+        if is_accepted:
+            logger.info(f"[CROP_REFINE_ACCEPT] label='{label}' coarse={coarse_box} -> refined={full_mapped_box} (IoU={iou:.3f}, containment={containment:.3f}, dist={dist:.1f})")
+            return full_mapped_box
+        else:
+            logger.info(f"[CROP_REFINE_REJECT] label='{label}' IoU={iou:.3f}, containment={containment:.3f} too low; keeping coarse.")
+            return None
+
+    except Exception as e:
+        logger.warning(f"[CROP_REFINE_ERROR] Exception during crop refinement for '{label}': {e}")
+        return None
+
+
+def detect_objects_in_tiles(
+    pil_img: Image.Image,
+    cat_name: str,
+    api_key: str,
+    model_name: str = BBOX_DETECTION_MODEL
+) -> List[dict]:
+    """
+    Splits pil_img into 2x2 overlapping tiles (25% overlap), detects cat_name in each tile,
+    maps candidate boxes back to full image 0-1000, and applies tile NMS (IoU ~ 0.50).
+    """
+    if pil_img is None:
+        return []
+
+    orig_w, orig_h = pil_img.size
+    tiles_1000 = [
+        {"x_min": 0.0, "y_min": 0.0, "x_max": 625.0, "y_max": 625.0},
+        {"x_min": 375.0, "y_min": 0.0, "x_max": 1000.0, "y_max": 625.0},
+        {"x_min": 0.0, "y_min": 375.0, "x_max": 625.0, "y_max": 1000.0},
+        {"x_min": 375.0, "y_min": 375.0, "x_max": 1000.0, "y_max": 1000.0},
+    ]
+
+    all_tile_dets = []
+
+    def process_tile(tile_bounds: dict) -> List[dict]:
+        px_x1 = int(round(tile_bounds["x_min"] * orig_w / 1000.0))
+        px_y1 = int(round(tile_bounds["y_min"] * orig_h / 1000.0))
+        px_x2 = int(round(tile_bounds["x_max"] * orig_w / 1000.0))
+        px_y2 = int(round(tile_bounds["y_max"] * orig_h / 1000.0))
+
+        tile_pil = pil_img.crop((px_x1, px_y1, px_x2, px_y2))
+        tile_bytes, mime_type, _, _ = encode_vlm_image_part(tile_pil, max_dim=1024)
+        tile_part = types.Part.from_bytes(data=tile_bytes, mime_type=mime_type)
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=10000)
+        )
+        prompt = (
+            f"Detect all visible physical instances of '{cat_name}' in this image tile.\n"
+            "Return a JSON object with 'detections': list of objects with 'label' and 'box_2d': [ymin, xmin, ymax, xmax] (0-1000 scale)."
+        )
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=DetectionEnvelope,
+            temperature=0.0,
+            thinking_config=types.ThinkingConfig(thinking_budget=0)
+        )
+
+        try:
+            resp = client.models.generate_content(model=model_name, contents=[tile_part, prompt], config=config)
+            raw = resp.text if resp and getattr(resp, "text", None) else ""
+            data = json.loads(clean_json_text(raw)) if raw else {}
+            items = data.get("detections") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            tile_mapped = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                cb = parse_gemini_box_2d(item.get("box_2d") or item.get("box2d"))
+                if cb:
+                    mapped = map_crop_box_to_full(cb, tile_bounds)
+                    if mapped:
+                        tile_mapped.append({"label": cat_name, "box": mapped})
+            return tile_mapped
+        except Exception as e:
+            logger.warning(f"[TILE_DETECT_ERROR] Error in tile detection: {e}")
+            return []
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(process_tile, tb) for tb in tiles_1000]
+        for fut in as_completed(futures):
+            res_dets = fut.result()
+            if res_dets:
+                all_tile_dets.extend(res_dets)
+
+    final_tile_dets = apply_tile_nms(all_tile_dets, iou_threshold=0.50)
+    logger.info(f"[TILE_DETECTION] Category '{cat_name}': {len(all_tile_dets)} raw tile detections -> {len(final_tile_dets)} after NMS")
+    return final_tile_dets
+
+
 def refine_bounding_boxes(
     result: GroundedAnalysisResult,
     image_part: types.Part,
     api_key: str,
-    model_name: str
+    model_name: str,
+    pil_image: Optional[Image.Image] = None
 ) -> GroundedAnalysisResult:
     """
-    Refines bounding boxes from the main analysis using candidate boxes from the dedicated localization pass.
-    
-    Robust Architecture:
-    1. Respects BBOX_REFINE_ENABLED kill switch.
-    2. Objects are matched GEOMETRICALLY (IoU + Center Distance) within the same category.
-    3. Consistency check: Candidate is accepted only if geometrically consistent with the original instance.
-    4. FALLBACK RULE: Never delete a valid original box because refinement failed or returned fewer boxes!
-    5. Sets localization_status ('ok' | 'missing') on each instance.
+    Refines bounding boxes from the main analysis using candidate boxes from the dedicated localization pass,
+    crop-based spatial refinement, tile-based missing object detection, and background quality filtering.
     """
     if not BBOX_REFINE_ENABLED:
         logger.info("[BBOX] BBOX_REFINE_ENABLED is False; skipping dedicated localization pass.")
@@ -641,18 +831,28 @@ def refine_bounding_boxes(
             if i not in used_detection_indices and labels_match(d["label"], cat_name)
         ]
 
-        # Targeted re-detection if verified instances lack candidate detections
         total_inst_count = len(cat.instances)
-        if BBOX_TARGETED_REDETECT and len(candidate_indices) < total_inst_count and total_inst_count > 0:
-            logger.info(f"[BBOX_REDETECT] Running targeted re-detection for '{cat_name}' (expected: {total_inst_count}, candidates: {len(candidate_indices)})")
-            redetected = redetect_category(image_part, api_key, cat_name, total_inst_count)
-            for rd in redetected:
-                if not any(calculate_iou(rd["box"], k["box"]) >= 0.85 for k in kept_detections):
-                    new_idx = len(kept_detections)
-                    kept_detections.append(rd)
-                    candidate_indices.append(new_idx)
+        # Targeted re-detection & tile detection if verified instances lack candidate detections
+        if len(candidate_indices) < total_inst_count and total_inst_count > 0:
+            if BBOX_TARGETED_REDETECT:
+                logger.info(f"[BBOX_REDETECT] Targeted re-detection for '{cat_name}' (expected: {total_inst_count}, candidates: {len(candidate_indices)})")
+                redetected = redetect_category(image_part, api_key, cat_name, total_inst_count)
+                for rd in redetected:
+                    if not any(calculate_iou(rd["box"], k["box"]) >= 0.85 for k in kept_detections):
+                        new_idx = len(kept_detections)
+                        kept_detections.append(rd)
+                        candidate_indices.append(new_idx)
 
-        # Separate instances with existing valid boxes vs unboxed instances
+            # If still short, run tile detection on overlapping tiles
+            if len(candidate_indices) < total_inst_count and pil_image is not None:
+                logger.info(f"[BBOX_TILE_REDETECT] Tile detection for '{cat_name}' (expected: {total_inst_count}, candidates: {len(candidate_indices)})")
+                tile_dets = detect_objects_in_tiles(pil_image, cat_name, api_key)
+                for td in tile_dets:
+                    if not any(calculate_iou(td["box"], k["box"]) >= 0.85 for k in kept_detections):
+                        new_idx = len(kept_detections)
+                        kept_detections.append(td)
+                        candidate_indices.append(new_idx)
+
         boxed_instances = []
         unboxed_instances = []
         for inst_idx, inst in enumerate(cat.instances):
@@ -678,7 +878,6 @@ def refine_bounding_boxes(
                 iou = calculate_iou(orig_b, cand_b)
                 center_dist = calculate_center_distance(orig_b, cand_b)
 
-                # Consistency check: Candidate is accepted if anchored to the object
                 single_pair = (len(boxed_instances) == 1 and len(candidate_indices) == 1)
                 is_consistent = (
                     iou >= 0.15 or
@@ -721,23 +920,10 @@ def refine_bounding_boxes(
             inst.bounding_box = BoundingBox(**cand_b)
             inst.localization_status = "ok"
 
-            logger.info(
-                f"[BBOX] category={cat_name} id={inst.id} "
-                f"original=[{match['orig_b']['x_min']},{match['orig_b']['y_min']},{match['orig_b']['x_max']},{match['orig_b']['y_max']}] "
-                f"localized=[{cand_b['x_min']},{cand_b['y_min']},{cand_b['x_max']},{cand_b['y_max']}] "
-                f"IoU={match['iou']:.3f} center_distance={match['center_dist']:.1f} decision=ACCEPT"
-            )
-
         for b_idx, (orig_pos, inst, orig_b) in enumerate(boxed_instances):
             if b_idx not in assigned_boxed:
                 inst.localization_status = "ok"
-                logger.info(
-                    f"[BBOX] category={cat_name} id={inst.id} "
-                    f"original=[{orig_b['x_min']},{orig_b['y_min']},{orig_b['x_max']},{orig_b['y_max']}] "
-                    f"decision=KEEP_ORIGINAL (no consistent candidate or candidate claimed by closer instance)"
-                )
 
-        # For unboxed instances, assign remaining candidates
         remaining_candidates = [c for c in candidate_indices if c not in assigned_candidates and c not in used_detection_indices]
         for (u_pos, inst) in unboxed_instances:
             if remaining_candidates:
@@ -746,17 +932,67 @@ def refine_bounding_boxes(
                 used_detection_indices.add(c_idx)
                 inst.bounding_box = BoundingBox(**cand_b)
                 inst.localization_status = "ok"
-                logger.info(
-                    f"[BBOX] category={cat_name} id={inst.id} original=None "
-                    f"localized=[{cand_b['x_min']},{cand_b['y_min']},{cand_b['x_max']},{cand_b['y_max']}] decision=ASSIGN_NEW"
-                )
             else:
                 inst.localization_status = "missing"
+
+    # Stage 2: Bounded Concurrent Crop Refinement
+    if BBOX_CROP_REFINEMENT and pil_image is not None:
+        crop_refine_tasks = []
+        for cat in result.objects:
+            cat_name = cat.name.strip().lower()
+            for inst in cat.instances:
+                if inst.bounding_box is not None:
+                    c_box = {
+                        'x_min': inst.bounding_box.x_min,
+                        'y_min': inst.bounding_box.y_min,
+                        'x_max': inst.bounding_box.x_max,
+                        'y_max': inst.bounding_box.y_max
+                    }
+                    crop_refine_tasks.append((cat_name, inst, c_box))
+
+        if crop_refine_tasks:
+            logger.info(f"[CROP_REFINE] Launching concurrent crop refinement for {len(crop_refine_tasks)} boxes...")
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                future_map = {
+                    executor.submit(refine_single_box_crop, pil_image, c_box, c_name, api_key): inst
+                    for (c_name, inst, c_box) in crop_refine_tasks
+                }
+                for fut in as_completed(future_map):
+                    target_inst = future_map[fut]
+                    refined = fut.result()
+                    if refined:
+                        target_inst.bounding_box = BoundingBox(**refined)
+                        target_inst.localization_status = "ok"
+
+    # Stage 3: Empty Background Sanity Filtering
+    if pil_image is not None:
+        orig_w, orig_h = pil_image.size
+        for cat in result.objects:
+            for inst in cat.instances:
+                if inst.bounding_box is not None:
+                    b = inst.bounding_box
+                    px_x1 = max(0, int(round(b.x_min * orig_w / 1000.0)))
+                    px_y1 = max(0, int(round(b.y_min * orig_h / 1000.0)))
+                    px_x2 = min(orig_w, int(round(b.x_max * orig_w / 1000.0)))
+                    px_y2 = min(orig_h, int(round(b.y_max * orig_h / 1000.0)))
+                    if (px_x2 - px_x1) >= 10 and (px_y2 - px_y1) >= 10:
+                        crop_check = pil_image.crop((px_x1, px_y1, px_x2, px_y2))
+                        if is_empty_background_crop(crop_check, stddev_threshold=6.0):
+                            logger.warning(f"[EMPTY_BG_DROP] Dropping box for '{inst.id}' placed on empty background.")
+                            inst.bounding_box = None
+                            inst.localization_status = "missing"
 
     return result
 
 
-def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, image_width: int = 0, image_height: int = 0) -> GroundedAnalysisResult:
+
+def analyze_image_grounded(
+    image: Union[Image.Image, types.Part],
+    api_key: str,
+    image_width: int = 0,
+    image_height: int = 0,
+    pil_image: Optional[Image.Image] = None
+) -> GroundedAnalysisResult:
     """
     Sends image or pre-encoded Part to Gemini VLM with structured Pydantic schema (GroundedAnalysisResult).
     Uses PRIMARY_VLM_MODEL and FALLBACK_VLM_MODEL with explicit timeouts, normalization, and field-level validation logging.
@@ -766,20 +1002,30 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
         api_key: Gemini API key.
         image_width: Width in pixels of the image being analyzed (for spatial calibration).
         image_height: Height in pixels of the image being analyzed (for spatial calibration).
+        pil_image: Optional original PIL Image for crop refinement & tile detection.
     """
     if not api_key or api_key == "your_api_key_here":
         raise ValueError("API_KEY_ERROR: Gemini API key (VLM_API_KEY) is missing or unconfigured.")
 
+    pil_img = pil_image
     if isinstance(image, types.Part):
         image_part = image
+        if pil_img is None and hasattr(image_part, "inline_data") and getattr(image_part.inline_data, "data", None):
+            try:
+                pil_img = Image.open(io.BytesIO(image_part.inline_data.data))
+                pil_img.load()
+            except Exception:
+                pass
     elif isinstance(image, Image.Image):
+        if pil_img is None:
+            pil_img = image
         img_bytes, mime_type, enc_w, enc_h = encode_vlm_image_part(image)
         image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
-        # Use encoded dimensions if caller didn't provide explicit dimensions
         if image_width <= 0 or image_height <= 0:
             image_width, image_height = enc_w, enc_h
     else:
         raise ValueError("INVALID_IMAGE: Provided input is not a valid image or Part object.")
+
 
     client = genai.Client(
         api_key=api_key,
@@ -905,7 +1151,7 @@ def analyze_image_grounded(image: Union[Image.Image, types.Part], api_key: str, 
                     raise ValueError(f"SCHEMA_VALIDATION_ERROR: Model '{model_name}' response did not match expected GroundedAnalysisResult schema.")
 
                 final_res = sanitize_bounding_boxes(raw_result)
-                final_res = refine_bounding_boxes(final_res, image_part, api_key, model_name)
+                final_res = refine_bounding_boxes(final_res, image_part, api_key, model_name, pil_image=pil_img)
                 final_res = sanitize_bounding_boxes(final_res)
                 final_res = reconcile_unboxed_instances(final_res)
                 logger.info(f"[VLM_SUCCESS] Grounded VLM analysis completed with '{model_name}' in {t_elapsed:.3f}s (objects={len(final_res.objects)}).")

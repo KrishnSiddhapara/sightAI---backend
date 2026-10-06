@@ -119,7 +119,7 @@ def run_evaluation() -> Dict[str, Any]:
             gt_data = json.load(f)
 
         # Run pipeline
-        res = analyze_image_grounded(image_part, api_key, image_width=opt_w, image_height=opt_h)
+        res = analyze_image_grounded(image_part, api_key, image_width=opt_w, image_height=opt_h, pil_image=img)
 
         predictions = []
         for cat in res.objects:

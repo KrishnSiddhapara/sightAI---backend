@@ -272,7 +272,7 @@ def run_debug_pipeline(image_path: str, output_dir: str = "docs/debug_output") -
     # STAGE 4: Final Refinement & Reconciliation
     # -------------------------------------------------------------
     logger.info("Executing STAGE 4: Refinement & Reconciliation...")
-    stage4_result = refine_bounding_boxes(stage2_result, image_part, api_key, PRIMARY_VLM_MODEL)
+    stage4_result = refine_bounding_boxes(stage2_result, image_part, api_key, PRIMARY_VLM_MODEL, pil_image=gemini_base_img)
     stage4_result = sanitize_bounding_boxes(stage4_result)
     stage4_result = reconcile_unboxed_instances(stage4_result)
 

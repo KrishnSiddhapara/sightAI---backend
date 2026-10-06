@@ -227,7 +227,7 @@ async def analyze_endpoint(request: Request, file: UploadFile = File(...)):
         # Step 4: Grounded VLM Analysis (uses pre-encoded image_part)
         t0_vlm = time.perf_counter()
         logger.info(f"[{req_id}] [VLM_REQUEST] Sending multimodal request to Gemini VLM API")
-        grounded_result: GroundedAnalysisResult = analyze_image_grounded(image_part, api_key, image_width=opt_w, image_height=opt_h)
+        grounded_result: GroundedAnalysisResult = analyze_image_grounded(image_part, api_key, image_width=opt_w, image_height=opt_h, pil_image=pil_img)
         t_vlm = time.perf_counter() - t0_vlm
         t_total = time.perf_counter() - t_start
 

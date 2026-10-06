@@ -314,3 +314,80 @@ def compute_image_transformation_metadata(
         "rotation": 0,
         "crop": None
     }
+
+
+def map_crop_box_to_full(
+    crop_box: Dict[str, float],
+    crop_bounds_1000: Dict[str, float]
+) -> Optional[Dict[str, float]]:
+    """
+    Maps normalized 0-1000 bounding box coordinates from a cropped sub-image / tile
+    back to full-image 0-1000 canonical coordinates.
+    """
+    if not crop_box or not crop_bounds_1000:
+        return None
+
+    cb_xmin = crop_bounds_1000['x_min']
+    cb_ymin = crop_bounds_1000['y_min']
+    cb_w = crop_bounds_1000['x_max'] - cb_xmin
+    cb_h = crop_bounds_1000['y_max'] - cb_ymin
+
+    full_xmin = cb_xmin + (crop_box['x_min'] / 1000.0) * cb_w
+    full_ymin = cb_ymin + (crop_box['y_min'] / 1000.0) * cb_h
+    full_xmax = cb_xmin + (crop_box['x_max'] / 1000.0) * cb_w
+    full_ymax = cb_ymin + (crop_box['y_max'] / 1000.0) * cb_h
+
+    return sanitize_box(full_xmin, full_ymin, full_xmax, full_ymax)
+
+
+def apply_tile_nms(
+    detections: List[Dict[str, Any]],
+    iou_threshold: float = 0.50
+) -> List[Dict[str, Any]]:
+    """
+    Applies Non-Maximum Suppression (NMS) across overlapping tile/crop detections.
+    Groups detections by category label and suppresses overlapping boxes (IoU >= iou_threshold).
+    """
+    if not detections:
+        return []
+
+    # Sort detections by box area
+    sorted_dets = sorted(
+        detections,
+        key=lambda d: (d["box"]["x_max"] - d["box"]["x_min"]) * (d["box"]["y_max"] - d["box"]["y_min"])
+    )
+
+    kept: List[Dict[str, Any]] = []
+    for det in sorted_dets:
+        box = det["box"]
+        label = det.get("label", "").lower()
+
+        overlap = False
+        for k in kept:
+            k_label = k.get("label", "").lower()
+            # Match category or label
+            if (label == k_label or label in k_label or k_label in label) and calculate_iou(box, k["box"]) >= iou_threshold:
+                overlap = True
+                break
+        if not overlap:
+            kept.append(det)
+
+    return kept
+
+
+def is_empty_background_crop(crop_img: Any, stddev_threshold: float = 6.0) -> bool:
+    """
+    Sanity check to reject bounding boxes placed on empty background or uniform surfaces.
+    Returns True if the crop has extremely low pixel standard deviation (uniform background).
+    """
+    if crop_img is None:
+        return True
+    try:
+        from PIL import ImageStat
+        stat = ImageStat.Stat(crop_img.convert("L"))
+        if not stat.stddev or stat.stddev[0] < stddev_threshold:
+            return True
+        return False
+    except Exception:
+        return False
+
