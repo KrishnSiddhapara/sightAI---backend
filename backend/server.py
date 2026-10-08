@@ -18,7 +18,7 @@ from google.genai import types
 # Import existing core Python AI service modules & utilities
 from utils.image_validation import validate_image_file, compute_image_hash, optimize_image_for_analysis, encode_vlm_image_part
 from utils.config import MAX_ANALYSIS_DIMENSION, ANALYSIS_TIMEOUT, FRONTEND_ORIGINS
-from services.safety import check_image_safety
+from services.safety import check_image_safety, check_edit_prompt_safety
 from services.vision import analyze_image_grounded
 from services.user_query import answer_image_query
 from services.image_editor import edit_image, check_edit_instruction_ambiguity, validate_edit_instruction
@@ -344,6 +344,21 @@ async def edit_image_endpoint(
     if val_err:
         raise HTTPException(status_code=400, detail=val_err)
 
+    # Pre-screening: Check Safety Guardrails on the text edit prompt ITSELF
+    prompt_safety = check_edit_prompt_safety(instruction, api_key)
+    if not prompt_safety.get("is_safe", True):
+        logger.warning(f"[EDIT_SAFETY_FLAGGED] Edit instruction rejected: {prompt_safety.get('category')} - prompt: '{instruction}'")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "success": False,
+                "is_safe": False,
+                "error": prompt_safety.get("error") or "Edit instruction was rejected by Safety Guardrails policy.",
+                "safety": prompt_safety,
+                "ambiguity_warning": None
+            }
+        )
+
     vision_ctx = None
     if vision_context_json and vision_context_json.strip():
         try:
@@ -408,10 +423,51 @@ async def edit_image_endpoint(
             "ambiguity_warning": None
         }
     except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
+        err_str = str(ve)
+        if "SAFETY_BLOCKED" in err_str or "safety" in err_str.lower() or "violence" in err_str.lower() or "nude" in err_str.lower():
+            clean_err = err_str.replace("SAFETY_BLOCKED: ", "")
+            safety_block_res = {
+                "is_safe": False,
+                "category": "SAFETY_BLOCKED",
+                "confidence": 1.0,
+                "reasoning": clean_err,
+                "error": f"⚠️ Safety Guardrail Triggered: {clean_err}",
+                "error_code": "SAFETY_BLOCKED"
+            }
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "is_safe": False,
+                    "error": safety_block_res["error"],
+                    "safety": safety_block_res,
+                    "ambiguity_warning": None
+                }
+            )
+        raise HTTPException(status_code=400, detail=err_str)
     except Exception as e:
+        err_str = str(e)
         logger.error(f"Error during image edit: {e}")
-        raise HTTPException(status_code=500, detail=f"Image edit failed: {str(e)}")
+        if "safety" in err_str.lower() or "violence" in err_str.lower() or "nude" in err_str.lower():
+            safety_block_res = {
+                "is_safe": False,
+                "category": "SAFETY_BLOCKED",
+                "confidence": 1.0,
+                "reasoning": err_str,
+                "error": f"⚠️ Safety Guardrail Triggered: {err_str}",
+                "error_code": "SAFETY_BLOCKED"
+            }
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "is_safe": False,
+                    "error": safety_block_res["error"],
+                    "safety": safety_block_res,
+                    "ambiguity_warning": None
+                }
+            )
+        raise HTTPException(status_code=500, detail=f"Image edit failed: {err_str}")
 
 @app.post("/api/ask")
 async def ask_question_endpoint(

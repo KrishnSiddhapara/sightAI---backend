@@ -189,3 +189,55 @@ def check_image_safety(image: Union[Image.Image, types.Part], api_key: str) -> D
             continue
 
     return get_fail_closed_response(last_error_detail or "Safety screening could not verify image safety.")
+
+PROHIBITED_EDIT_PATTERNS = [
+    # Nudity & Sexual Content
+    (r"\b(naked|nude|nudity|undress|undressed|topless|bottomless|porn|porno|pornography|sex|sexual|sexually|erotic|genitals|breast|breasts|penis|vagina|lingerie|strip)\b", SafetyCategory.NUDITY, "Nudity or sexually explicit content is prohibited."),
+    # Graphic Violence & Gore
+    (r"\b(blood|bloody|bleed|bleeding|gore|gory|stab|stabbed|stabbing|shoot|shooting|shot|kill|killed|killing|murder|murdered|decapitate|decapitated|mutilate|mutilated|wound|wounded|open wound|bullet hole|corpse|slashing|slashed)\b", SafetyCategory.GRAPHIC_VIOLENCE, "Graphic violence, gore, or physical harm is prohibited."),
+    # Violence, Civil Unrest & Weapons Assault
+    (r"\b(assault|assaulting|beating|attack|attacking|gunfire|terrorist|terrorism|bomb|bombing|explosion|decapitation)\b", SafetyCategory.VIOLENCE_AND_CIVIL_UNREST, "Violence, attacks, terrorism, or dangerous conflict imagery is prohibited."),
+    # Self-Harm & Hate Speech
+    (r"\b(suicide|self-harm|self harm|hanging|nazi|swastika)\b", SafetyCategory.OTHER_SENSITIVE_CONTENT, "Offensive, hate speech, or sensitive content is prohibited.")
+]
+
+def check_edit_prompt_safety(instruction: str, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Performs safety guardrail screening on user image edit text instruction.
+    Returns structured safety dictionary with is_safe, category, reasoning, and error.
+    """
+    import re
+    if not instruction or not instruction.strip():
+        return {
+            "is_safe": True,
+            "category": SafetyCategory.SAFE.value,
+            "confidence": 1.0,
+            "reasoning": "Empty instruction.",
+            "error": None,
+            "error_code": None
+        }
+
+    instr_lower = instruction.strip().lower()
+
+    # Rule 1: Fast pattern matching against prohibited safety categories
+    for pattern, category, desc in PROHIBITED_EDIT_PATTERNS:
+        if re.search(pattern, instr_lower):
+            logger.warning(f"[SAFETY_PROMPT_BLOCK] Edit instruction blocked by pattern '{pattern}': category={category.value}")
+            return {
+                "is_safe": False,
+                "category": category.value,
+                "confidence": 0.98,
+                "reasoning": f"Edit instruction violates safety guardrails policy: {desc}",
+                "error": f"⚠️ Safety Guardrail Triggered: Requested edit contains prohibited content ({category.value.replace('_', ' ')}). {desc}",
+                "error_code": "PROMPT_SAFETY_FLAGGED"
+            }
+
+    return {
+        "is_safe": True,
+        "category": SafetyCategory.SAFE.value,
+        "confidence": 1.0,
+        "reasoning": "Instruction passed safety guardrail pre-screening.",
+        "error": None,
+        "error_code": None
+    }
+

@@ -188,8 +188,11 @@ def edit_image(
                     raise ValueError(f"No response candidates returned from model '{model_name}'.")
 
                 candidate = response.candidates[0]
+                finish_reason = str(getattr(candidate, "finish_reason", "UNKNOWN")).upper()
+                if "SAFETY" in finish_reason or "RECITATION" in finish_reason or "BLOCK" in finish_reason:
+                    raise ValueError(f"SAFETY_BLOCKED: Image editor rejected generation due to safety policy ({finish_reason}). Requests involving violence, nudity, or offensive content are strictly prohibited.")
+
                 if not candidate.content or not candidate.content.parts:
-                    finish_reason = getattr(candidate, "finish_reason", "UNKNOWN")
                     raise ValueError(f"Empty content from image editor (Finish reason: {finish_reason}).")
 
                 # Look for inline_data containing image bytes (DO NOT shadow input_image_part)
@@ -203,6 +206,8 @@ def edit_image(
                     # If model returned text instead of an image
                     text_parts = [part.text for part in candidate.content.parts if getattr(part, "text", None)]
                     text_msg = " ".join(text_parts).strip() if text_parts else "No image output part returned."
+                    if "safety" in text_msg.lower() or "policy" in text_msg.lower() or "violence" in text_msg.lower() or "nude" in text_msg.lower() or "explicit" in text_msg.lower():
+                        raise ValueError(f"SAFETY_BLOCKED: {text_msg}")
                     raise ValueError(f"Model did not return a generated image: {text_msg}")
 
                 # Decode bytes into PIL Image
